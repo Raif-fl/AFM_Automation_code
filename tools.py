@@ -6,6 +6,7 @@ import matplotlib as mpl
 mpl.rcParams['figure.dpi'] = 300
 from PIL import Image
 import cv2
+import pandas as pd
 import imutils
 from scipy.spatial import distance as dist
 from imutils import perspective
@@ -53,6 +54,24 @@ def get_boxes(outl):
         # draw the bounding boxes and centers. 
         boxes.append(box)
     return boxes
+
+def get_max_ID(IDs_list):
+    maxi = []
+    for ID_set in IDs_list:
+        maxi.append(max(ID_set))
+    return max(maxi)
+
+def get_metadata(exact_ID, IDs_list, per_list, area_list, overl_list, centers_list, time_list):
+    data = []
+    for ID_set, per_set, area_set, overl_set, centers_set, time in zip(IDs_list,
+                                    per_list, area_list, overl_list, centers_list, time_list):
+        for ID, per, area, overl, center in zip(ID_set, per_set, area_set, overl_set, centers_set):
+            if ID == exact_ID:
+                data.append(dict(zip(["time", "perimeter", "area", "overl_set", "centers_set"], [time, per, area, overl, center])))
+        data.append(dict(zip(["time", "perimeter", "area", "overl_set", "centers_set"], [time, np.nan, np.nan, np.nan, np.nan])))
+    df = pd.DataFrame(data)
+    df = df.drop_duplicates(subset = "time", ignore_index = True)
+    return(df)
 
 # import the necessary packages
 from collections import OrderedDict
@@ -170,20 +189,3 @@ class CentroidTracker():
                     self.register(inputCentroids[col], outls[col])
         # return the set of trackable objects
         return self.objects
-    
-###!!!### This was originally part of the above function but was removed as it is not needed in our context.
-        # check to see if the list of input bounding box rectangles
-        # is empty
-        #if len(rects) == 0:
-            # loop over any existing tracked objects and mark them
-            # as disappeared
-         #   for objectID in list(self.disappeared.keys()):
-           #     self.disappeared[objectID] += 1
-                # if we have reached a maximum number of consecutive
-                # frames where a given object has been marked as
-                # missing, deregister it
-          #     if self.disappeared[objectID] > self.maxDisappeared:
-          #          self.deregister(objectID)
-            # return early as there are no centroids or tracking info
-            # to update
-           # return self.objects

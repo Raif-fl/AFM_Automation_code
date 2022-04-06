@@ -11,6 +11,11 @@ import imutils
 from scipy.spatial import distance as dist
 from imutils import perspective
 import re
+import imageio
+import skimage.morphology as sk_m
+from fil_finder import FilFinder2D
+from astropy import units as u
+from radfil import radfil_class, styles
 
 def atoi(text):
     return int(text) if text.isdigit() else text
@@ -55,20 +60,191 @@ def get_boxes(outl):
         boxes.append(box)
     return boxes
 
+def get_overlap(outl, centers):
+    cell_overlaps = []
+    for out_cell, cen_cell in zip(outl, centers):
+        adj = 0
+        for out_oth, cen_oth in zip(outl, centers):
+            cent_dist = dist.euclidean(cen_cell,cen_oth)
+            # centroid distance cuttod=ff = 150 pixels. 
+            if cent_dist > 150 or cent_dist == 0:
+                continue
+            for pixel1 in out_cell:
+                for pixel2 in out_oth:
+                    distx = np.abs(pixel1[0]-pixel2[0])
+                    disty = np.abs(pixel1[1]-pixel2[1])
+                    if distx + disty == 1:
+                        adj = adj + 1
+        cell_overlaps.append(adj)
+    return cell_overlaps 
+
+def peri_area(outl_list):
+    per_list = []
+    area_list = []
+    for outl in outl_list:
+        peris = []
+        areas = []
+        for o in outl:
+            peris.append(cv2.arcLength(o, True))
+            areas.append(cv2.contourArea(o))
+        per_list.append(peris)
+        area_list.append(areas)
+    return per_list, area_list
+
+def save_ind_masks(path, IDs_list, outl_new_list, time_list, img_list):
+    for ID_set, outl, time, img in zip(IDs_list, outl_new_list, time_list, img_list):
+        if os.path.exists(path + str(time)) == False:
+            os.makedirs(path + str(time))
+        if os.path.exists(path + str(time) + "/cells") == False:
+            os.makedirs(path + str(time) + "/cells")
+        if os.path.exists(path + str(time) + "/masks") == False:
+            os.makedirs(path + str(time) + "/masks")
+        if os.path.exists(path + str(time) + "/skeletons") == False:
+            os.makedirs(path + str(time) + "/skeletons")
+        for idx, cell in zip(ID_set, outl):
+            # mask outline
+            mask = np.zeros(img.shape, dtype=np.uint8)
+            channel_count = img.shape[2]  # i.e. 3 or 4 depending on your image
+            ignore_mask_color = (255,)*channel_count
+            cv2.fillPoly(mask, [cell], ignore_mask_color)
+            masked_image = cv2.bitwise_and(img, mask)
+    
+            # crop the cell
+            x = cell.flatten()[::2]
+            y = cell.flatten()[1::2]
+
+            (topy, topx) = (np.min(y), np.min(x))
+            (bottomy, bottomx) = (np.max(y), np.max(x))
+            out_cell = masked_image[topy:bottomy+1, topx:bottomx+1]
+            out_mask = mask[topy:bottomy+1, topx:bottomx+1]
+            
+            # save the cell outline
+            im_mask = Image.fromarray(out_mask)
+            im_mask.save(path + str(time) + "/masks" + "/" + "mask_" + str(idx) + ".png")
+            cv2.imwrite(path + str(time) + "/cells" + "/" + "cell_" + str(idx) + ".png", out_cell)
+            
+def radobj_maker(path, IDs_list, time_list):
+    '''
+    This iterative function loads up a set of images, masks and skeletons for individual cells which were created 
+    from a set of parent images taken at different timepoints. For each of these individual cells, it then uses
+    the radfil package to estimate the radial profile of the cell which is then saved in a list of radfil objects. 
+    '''
+    radobj_list = []
+    for ID_set, time in zip(IDs_list, time_list):
+        radobj_set = []
+        for idx in (ID_set):
+            # Load the image and convert to grayscale. 
+            fil_image =imageio.imread(path + str(time) + "/cells/cell_" + str(idx) + ".png")
+            fil_image = cv2.cvtColor(fil_image, cv2.COLOR_BGR2GRAY)
+            
+            # Load the mask and convert to grayscale
+            fil_mask=imageio.imread(path + str(time) + "/masks/mask_" + str(idx) + ".png")
+            fil_mask = cv2.cvtColor(fil_mask, cv2.COLOR_BGR2GRAY)
+            fil_mask = np.array(fil_mask, dtype=bool)
+
+            ###!!!### Replace with a call to Hasti's stuff
+            fil_spine = sk_m.skeletonize(fil_mask)
+            fil_spine = np.array(fil_spine, dtype=bool)
+            
+            # Use radfil to create a radial profil object and then append this object to a list.
+            # We will use the data stored in this object to calculate height and radial profile along the
+            # medial axis. 
+            radobj=radfil_class.radfil(fil_image, mask=fil_mask, filspine=fil_spine, distance=200)
+            radobj.build_profile(samp_int=1, shift = False)
+            radobj_set.append(radobj)
+        radobj_list.append(radobj_set)
+    return(radobj_list)
+
+def find_nearest(array, value):
+    '''
+    Finds the nearest value in an array and returns the index of that value.
+    '''
+    array = np.asarray(array)
+    idx = (np.abs(array - value)).argmin()
+    return idx
+
+def radobj_extractor(radobj_list):
+    '''
+    This function iterates through a list of radfil objects and extracts two meaningful outputs for each cell.
+    The first is a list that details the diameter of the cell along the medial axis, and the second is a list
+    that details the pixel intensity of the original image along the medial axis. This second list will reflect
+    whatever the original image was measuring (e.g. height, stiffness, brightness). 
+    '''
+    diam_list = []
+    height_list = []
+    for radobj_set in radobj_list:
+        diam_set = []
+        height_set = []
+        for radobj in radobj_set:
+            diam = []
+            height = []
+            for dist, prof in zip(radobj.dictionary_cuts['distance'],radobj.dictionary_cuts['profile']) :
+                diam.append(np.abs(dist[0] - dist[-1]))
+                # it is not argmin, it is closest to zero! 
+                ind = find_nearest(dist,0)
+                height.append(prof[ind])
+            diam_set.append(diam)
+            height_set.append(height)
+        diam_list.append(diam_set)
+        height_list.append(height_set)
+    return diam_list, height_list
+
+def skeleton_length(path, IDs_list, time_list):
+    '''
+    This iterative function loads up a set of skeletons for individual cells which were created 
+    from a set of parent images taken at different timepoints. For each of these skeletons, it uses
+    the filfinder package to convert the skeleton to a filfinder skeleton. This fairly complicated
+    process is done simply so that the length of the skeleton can be recorded. 
+    '''
+    length_list = []
+    for ID_set, time in zip(IDs_list, time_list):
+        length_set = []
+        for idx in (ID_set):
+             ###!!!### Replace with a call to Hasti's stuff
+            fil_mask=imageio.imread(path + str(time) + "/masks/mask_" + str(idx) + ".png")
+            skeleton = sk_m.skeletonize(fil_mask)
+            skeleton = cv2.cvtColor(skeleton, cv2.COLOR_BGR2GRAY)
+
+            fil = FilFinder2D(skeleton, distance=250 * u.pix, mask=skeleton)
+            fil.preprocess_image(flatten_percent=85)
+            fil.create_mask(border_masking=True, verbose=False,
+            use_existing_mask=True)
+            fil.medskel(verbose=False)
+            fil.analyze_skeletons(branch_thresh=40* u.pix, skel_thresh=10 * u.pix, prune_criteria='length')
+            if len(fil.lengths().value) > 0:
+                length = fil.lengths().value[0]
+            else:
+                length = np.nan
+        
+            length_set.append(length)
+        length_list.append(length_set)
+    return(length_list)
+
 def get_max_ID(IDs_list):
     maxi = []
     for ID_set in IDs_list:
         maxi.append(max(ID_set))
     return max(maxi)
 
-def get_metadata(exact_ID, IDs_list, per_list, area_list, overl_list, centers_list, time_list):
+def get_metadata(exact_ID, IDs_list, per_list, area_list,
+                 overl_list, centers_list, time_list,
+                diam_list, height_list, length_list):
     data = []
-    for ID_set, per_set, area_set, overl_set, centers_set, time in zip(IDs_list,
-                                    per_list, area_list, overl_list, centers_list, time_list):
-        for ID, per, area, overl, center in zip(ID_set, per_set, area_set, overl_set, centers_set):
-            if ID == exact_ID:
-                data.append(dict(zip(["time", "perimeter", "area", "overl_set", "centers_set"], [time, per, area, overl, center])))
-        data.append(dict(zip(["time", "perimeter", "area", "overl_set", "centers_set"], [time, np.nan, np.nan, np.nan, np.nan])))
+    for ID_set, per_set, area_set, overl_set, centers_set, time, diam_set, height_set, length_set in zip(IDs_list,
+                                    per_list, area_list, overl_list, centers_list, time_list,
+                                    diam_list, height_list, length_list):
+        if exact_ID in ID_set:
+            for idx, per, area, overl, center, diam, height, length in zip(ID_set,
+                                            per_set, area_set, overl_set, centers_set,
+                                            diam_set, height_set, length_set):
+                if idx == exact_ID:
+                    data.append(dict(zip(["time", "perimeter", "area", "overl", "location",
+                                     "diameter profile (pixels)", "Height (pixel intensity)", "length (pixels)"],
+                                        [time, per, area, overl, center, diam, height, length])))
+        else:
+            data.append(dict(zip(["time", "perimeter", "area", "overl", "location",
+                                     "diameter profile (pixels)", "Height (pixel intensity)", "length (pixels)"], 
+                                 [time, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan])))
     df = pd.DataFrame(data)
     df = df.drop_duplicates(subset = "time", ignore_index = True)
     return(df)

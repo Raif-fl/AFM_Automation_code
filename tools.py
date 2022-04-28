@@ -328,6 +328,7 @@ def radobj_extractor(radobj_list, h_conv = 3.9215686274509802):
     # Initialize lists to hold the data for each image.
     diam_list = []
     height_list = []
+    profile_list = []
     for radobj_set in radobj_list:
         # Initialize lists to hold the data for each individual cell
         diam_set = []
@@ -336,6 +337,7 @@ def radobj_extractor(radobj_list, h_conv = 3.9215686274509802):
             # Initialize lists to hold the data for each point along the skeleton. 
             diam = []
             height = []
+            profile = []
             for dist, prof in zip(radobj.dictionary_cuts['distance'],radobj.dictionary_cuts['profile']) :
                 # Calculate the diameter along the skeleton.
                 diam.append(np.abs(dist[0] - dist[-1]))
@@ -343,6 +345,7 @@ def radobj_extractor(radobj_list, h_conv = 3.9215686274509802):
                 # Calculate the pixel intensity along the skeleton and convert to height. 
                 ind = find_nearest(dist,0)
                 height.append(prof[ind]*h_conv)
+                height_profile.append(prof)
                 
             diam_set.append(diam)
             height_set.append(height)

@@ -329,16 +329,19 @@ def radobj_extractor(radobj_list, h_conv = 3.9215686274509802):
     diam_list = []
     height_list = []
     profile_list = []
+    dist_list = []
     for radobj_set in radobj_list:
         # Initialize lists to hold the data for each individual cell
         diam_set = []
         height_set = []
         profile_set = []
+        dist_set = []
         for radobj in radobj_set:
             # Initialize lists to hold the data for each point along the skeleton. 
             diam = []
             height = []
             profile = []
+            distance = []
             for dist, prof in zip(radobj.dictionary_cuts['distance'],radobj.dictionary_cuts['profile']) :
                 # Calculate the diameter along the skeleton.
                 diam.append(np.abs(dist[0] - dist[-1]))
@@ -347,14 +350,17 @@ def radobj_extractor(radobj_list, h_conv = 3.9215686274509802):
                 ind = find_nearest(dist,0)
                 height.append(prof[ind]*h_conv)
                 profile.append(prof*h_conv)
+                distance.append(dist)
             
             profile_set.append(profile)
             diam_set.append(diam)
             height_set.append(height)
+            dist_set.append(distance)
         profile_list.append(profile_set)
         diam_list.append(diam_set)
         height_list.append(height_set)
-    return diam_list, height_list, profile_list
+        dist_list.append(dist_set)
+    return diam_list, height_list, profile_list, dist_list
 
 def get_max_ID(IDs_list):
     '''
@@ -367,10 +373,9 @@ def get_max_ID(IDs_list):
 
 def get_metadata(exact_ID, IDs_list, per_list, area_list,
                  overl_list, centers_list, time_list,
-                diam_list, height_list, profile_list, length_list):
+                diam_list, height_list, profile_list,
+                 dist_list, length_list):
     '''
-    
-    
     Parameters
     ---------------  
     exact_ID: integer
@@ -409,21 +414,23 @@ def get_metadata(exact_ID, IDs_list, per_list, area_list,
     A dataframe with parameters as columns (perimeter, area, etc) and timepoints as rows. 
     '''
     data = []
-    for ID_set, per_set, area_set, overl_set, centers_set, time, diam_set, height_set, profile_set, length_set in zip(IDs_list,
+    for ID_set, per_set, area_set, overl_set, centers_set, time, diam_set, height_set, profile_set, dist_set, length_set in zip(IDs_list,
                                     per_list, area_list, overl_list, centers_list, time_list,
-                                    diam_list, height_list, profile_list, length_list):
+                                    diam_list, height_list, profile_list, dist_list, length_list):
         if exact_ID in ID_set:
-            for idx, per, area, overl, center, diam, height, profile, length in zip(ID_set,
+            for idx, per, area, overl, center, diam, height, profile, dist, length in zip(ID_set,
                                             per_set, area_set, overl_set, centers_set,
-                                            diam_set, height_set, profile_set, length_set):
+                                            diam_set, height_set, profile_set, dist_set, length_set):
                 if idx == exact_ID:
                     data.append(dict(zip(["time", "perimeter", "area", "overl", "location",
-                                     "diameter profile (pixels)", "Height (nm)", "Height Profile (nm)", "length (pixels)"],
-                                        [time, per, area, overl, center, diam, height, profile, length])))
+                                     "diameter profile (pixels)", "Height (nm)", "Height Profile (nm)",
+                                          "Distance Profile (nm)", "length (pixels)"],
+                                        [time, per, area, overl, center, diam, height, profile, dist, length])))
         else:
             data.append(dict(zip(["time", "perimeter", "area", "overl", "location",
-                                     "diameter profile (pixels)", "Height (nm)", "Height Profile (nm)", "length (pixels)"], 
-                                 [time, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan])))
+                                     "diameter profile (pixels)", "Height (nm)",
+                                  "Height Profile (nm)", "Distance Profile (nm)", "length (pixels)"], 
+                                 [time, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan])))
     df = pd.DataFrame(data)
     df = df.drop_duplicates(subset = "time", ignore_index = True)
     return(df)

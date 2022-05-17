@@ -551,4 +551,123 @@ class CentroidTracker():
         # return the set of trackable objects
         return self.objects
     
+def fskel(mask, b_thresh=40, sk_thresh=20):
+    '''
+    Takes a mask in the form of a numpy boolean array. It returns a filfinder skeleton and a pruned filfinder skeleton.
     
+    Parameters
+    -------------
+    mask = mask of an image in the form of a 2d numpy boolean array
+    b_thresh = the branch threshold which will be used inputted into fil.analyze_skeletons
+    sk_thresh = the skeletonization threshold which will be inputed into fil.analyze_skeletons
+    '''
+    mask = mask*255
+    fil=FilFinder2D(mask,mask=mask)
+    fil.preprocess_image(skip_flatten=True)
+    fil.create_mask(use_existing_mask=True)
+    fil.medskel(verbose=False)
+    unpruned_skel = fil.skeleton
+    fil.analyze_skeletons(branch_thresh=b_thresh*u.pix, skel_thresh=sk_thresh*u.pix, prune_criteria='length')
+    skel = fil.skeleton_longpath
+    return unpruned_skel,skel
+
+def intersection(line1,line2,width1=3,width2=3):
+    '''
+    Find if two lines intersect, or nearly intersect
+    
+    Parameteres
+    -----------
+    line1,line2=boolean arrays with 'True' values where the line exists
+    width1,width2=amount (in pixels) the line should be dilated to see if a near intersection occurs
+    '''
+    m=np.shape(line1)[1]
+    n=np.shape(line1)[0]
+    d=m//2
+    l_check = np.sum(line1[0:n,0:d]+line2[0:n,0:d]==2)>0
+    r_check = np.sum(line1[0:n,d:m-1]+line2[0:n,d:m-1]==2)>0
+    if l_check and r_check:
+        return True
+    else:
+        kernel1 = cv2.getStructuringElement(cv2.MORPH_RECT,(width1,width1))
+        kernel2 = cv2.getStructuringElement(cv2.MORPH_RECT,(width2,width2))
+        dilated1 = cv2.dilate(line1.astype(np.uint8),kernel1,iterations=1)
+        dilated2 = cv2.dilate(line2.astype(np.uint8),kernel2,iterations=1)
+        m=np.shape(line1)[1]
+        n=np.shape(line1)[0]
+        d=m//2
+        l_check = np.sum(dilated1[0:n,0:d]+dilated2[0:n,0:d]==2)>0
+        r_check = np.sum(dilated1[0:n,d:m-1]+dilated2[0:n,d:m-1]==2)>0
+        if l_check and r_check:
+            return True
+        else:
+            return False
+
+def skeleton_to_centerline(skeleton):
+    '''
+    Finds an ordered list of points which trace out a skeleton with no branches by following the pixels of the centerline 
+    elementwise. Starts at the point farthest left and closest to the top. Ends when there are no new points on the skeleton 
+    to go to.
+    Parameters
+    ----------
+    skel = a 2d numpy boolean array representing a topological skeleton with no branches
+    '''
+    #initializing lists and starting parameters
+    centerline=[]
+    pos = bool_sort(skeleton)[0] # finds and sorts all points where the skeleton exists. Selects leftest as initial position
+    centerline.append(pos) #appends initial position to the centerline
+    skeleton[pos[0],pos[1]]=False #erases the previous positon
+    local = make_local(skeleton,pos)
+    while np.any(local): #checks if there are any new positions to go to
+        pos = pos+bool_sort(local)[0]-np.array([1,1]) #updates position
+        centerline.append(pos) #adds position to centerline
+        skeleton[pos[0],pos[1]]=False #erases previous position
+        local = make_local(skeleton,pos) #updates the local minor for the new position
+    return centerline
+
+def make_local(matrix,pos):
+    '''
+    Extracts the 3x3 array of values around a position in an existing array. If this is not possible (if the position 
+    is along an edge), completes the array with rows/columns of 'False' values
+    Paramters
+    ---------
+    matrix = a 2d numpy array
+    pos = a numpy array or list, indicating a position in array
+    '''
+    N = np.shape(matrix)[0]+1
+    M = np.shape(matrix)[1]+1
+    n1 = max(0,pos[0]-1)
+    n2 = min(N,pos[0]+2)
+    m1 = max(0,pos[1]-1)
+    m2 = min(M,pos[1]+2)
+    if n1 == pos[0]-1 and n2 != N and m1==pos[1]-1 and m2!=M:
+        return matrix[n1:n2,m1:m2]
+    elif n1 == 0:
+        if m1 == 0:
+            return np.hstack((np.array([[False],[False],[False]]),np.vstack((np.array([False,False]), matrix[n1:n2,m1:m2]))))
+        elif m2 == M:
+            return np.hstack((np.vstack((np.array([False,False]), matrix[n1:n2,m1:m2])),np.array([[False],[False],[False]])))
+        else:
+            return np.vstack((np.array([False,False,False]), matrix[n1:n2,m1:m2]))
+    elif n2 == N:
+        if m1 == 0:
+            return np.hstack((np.array([[False],[False],[False]]),np.vstack((matrix[n1:n2,m1:m2],np.array([False,False])))))
+        elif m2==M:
+            return np.hstack((np.vstack((matrix[n1:n2,m1:m2],np.array([False,False]))),np.array([[False],[False],[False]])))
+        else:
+            return np.vstack((matrix[n1:n2,m1:m2],np.array([False,False,False])))
+    elif m1==0:
+        return np.hstack((np.array([[False],[False],[False]]),matrix[n1:n2,m1:m2]))
+    elif m2 ==M:
+        return np.hstack((matrix[n1:n2,m1:m2],np.array([[False],[False],[False]])))
+
+def bool_sort(array):
+    '''
+    Sort the "True" values in a boolean array, starting from left to right, then top to bottom
+    Parameters
+    ---------
+    array = a boolean array to be sorted
+    '''
+    output = np.transpose(np.array(list(np.where(array))))
+    output = output[output[:,0].argsort()]
+    output = output[output[:,1].argsort(kind='mergesort')]
+    return output

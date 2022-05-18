@@ -50,7 +50,7 @@ def get_boxes(outl):
         boxes.append(box)
     return boxes
 
-def get_overlap(outl, boxes):
+def get_overlap(outl_list, boxes_list):
     '''
     A function which iterates over all cell outlines in an image and detects how much of the cell's
     surface is overlapping/touching another cell's. 
@@ -73,34 +73,36 @@ def get_overlap(outl, boxes):
     another cell outline. 
     
     '''
-    # initialize a list to save the overlaps
-    cell_overlaps = []
-    
-    # Loop through each cell in the image. 
-    for out_cell, box_cell in zip(outl, boxes):
-        adj = 0
-        # For each cell in the image, loop through everyother cell in the image.
-        for out_oth, box_oth in zip(outl, boxes):
-            # detect if the two cells have overlapping bounding boxes.
-            # If bounding boxes do not overlap, skip to next cell. 
-            p1 = Polygon(box_cell)
-            p2 = Polygon(box_oth)
-            if p1.intersects(p2) == False or p1 == p2:
-                continue
-            # For each pixel in cell outline, measure the distance to the pixels
-            # in the other cell outline. If said distance is zero, then the pixels
-            # are overlapping. 
-            for pixel1 in out_cell:
-                for pixel2 in out_oth:
-                    distx = np.abs(pixel1[0]-pixel2[0])
-                    disty = np.abs(pixel1[1]-pixel2[1])
-                    if distx + disty == 1:
-                        adj = adj + 1
-        # append the overlap information to our list.
-        cell_overlaps.append(adj)
-    return cell_overlaps 
+    overl_list = []
+    for outl, boxes in zip(outl_list, boxes_list):
+        # initialize a list to save the overlaps
+        cell_overlaps = []
+        # Loop through each cell in the image. 
+        for out_cell, box_cell in zip(outl, boxes):
+            adj = 0
+            # For each cell in the image, loop through everyother cell in the image.
+            for out_oth, box_oth in zip(outl, boxes):
+                # detect if the two cells have overlapping bounding boxes.
+                # If bounding boxes do not overlap, skip to next cell. 
+                p1 = Polygon(box_cell)
+                p2 = Polygon(box_oth)
+                if p1.intersects(p2) == False or p1 == p2:
+                    continue
+                # For each pixel in cell outline, measure the distance to the pixels
+                # in the other cell outline. If said distance is zero, then the pixels
+                # are overlapping. 
+                for pixel1 in out_cell:
+                    for pixel2 in out_oth:
+                        distx = np.abs(pixel1[0]-pixel2[0])
+                        disty = np.abs(pixel1[1]-pixel2[1])
+                        if distx + disty == 1:
+                            adj = adj + 1
+            # append the overlap information to our list.
+            cell_overlaps.append(adj)
+        overl_list.append(cell_overlaps)
+    return overl_list 
 
-def peri_area(outl):
+def peri_area(outl_list):
     '''
     An iterative function that calculates the perimeter and area for all cell outlines within a 
     list of images. 
@@ -120,14 +122,19 @@ def peri_area(outl):
     List should contain the area of a cell in pixels for each cell in image.
     '''
     # Initialize lists to hold the perimeter and area infromation within each individual image. 
-    peris = []
-    areas = []
-    for o in outl:
-        # Calculate the perimeter and area for each outline and 
-        # append values to lists. 
-        peris.append(cv2.arcLength(o, True))
-        areas.append(cv2.contourArea(o))
-    return peris, areas
+    per_list = []
+    area_list = []
+    for outl in outl_list:
+        peris = []
+        areas = []
+        for o in outl:
+            # Calculate the perimeter and area for each outline and 
+            # append values to lists. 
+            peris.append(cv2.arcLength(o, True))
+            areas.append(cv2.contourArea(o))
+        per_list.append(peris)
+        area_list.append(areas)
+    return per_list, area_list
 
 def save_ind_masks(path, IDs_list, outl_new_list, time_list, img_list):
     '''

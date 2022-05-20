@@ -194,61 +194,6 @@ def save_ind_masks(path, IDs_list, outl_new_list, time_list, img_list):
             im_mask = Image.fromarray(out_mask)
             im_mask.save(path + str(time) + "/masks" + "/" + "mask_" + str(idx) + ".png")
             cv2.imwrite(path + str(time) + "/cells" + "/" + "cell_" + str(idx) + ".png", out_cell)
-            
-def skeleton_length(path, ID_set, time):
-    '''
-    This iterative function loads up a set of skeletons for individual cells which were created 
-    from a set of parent images taken at different timepoints. For each of these skeletons, it uses
-    the filfinder package to convert the skeleton to a filfinder skeleton. This fairly complicated
-    process is done simply so that the length of the skeleton can be recorded. 
-    
-    Parameters
-    ---------------
-    path: string
-    A string which contains the path to the individual cell images and cell masks. 
-    
-    ID_set: list
-    list that contains the cell IDs for an image.
-    
-    time: integer
-    The time point for an image. 
-    
-    Returns
-    ---------------
-    length_set: list
-    A list which contains the length of each cell from an image as a float with pixel units. 
-    '''
-    # Initialize a list to hold skeleton lengths for each individual cell.
-    length_set = []
-    for idx in (ID_set):
-        # Load the skeleton as a list of coordinates and then convert to an image array. 
-        skeleton = np.loadtxt(open(path + str(time) + "/skeletons/matrix_" + str(idx) + ".csv", "rb"), delimiter=",", skiprows=1)[1:-2].astype(int)
-        dbl = int((len(skeleton)-2)/2)
-        cut_skeleton = skeleton[1:-2]
-
-        x, y = [i[0] for i in cut_skeleton], [i[1] for i in cut_skeleton]
-
-        fil_mask=imageio.imread(path + str(time) + "/masks/mask_" + str(idx) + ".png")
-        fil_skeleton = np.zeros(fil_mask.shape, dtype = 'uint8')
-
-        for i in range(len(cut_skeleton)):
-            fil_skeleton[y[i], x[i]] = 1
-            
-        # Convert the fil_skeleton to grayscale.
-        fil_skeleton = cv2.cvtColor(fil_skeleton, cv2.COLOR_BGR2GRAY)
-            
-        # Convert the original skeleton into a filfinder spine. 
-        fil = FilFinder2D(fil_skeleton, distance=250 * u.pix, mask=fil_skeleton)
-        fil.preprocess_image(flatten_percent=85)
-        fil.create_mask(border_masking=True, verbose=False,
-        use_existing_mask=True)
-        fil.medskel(verbose=False)
-        fil.analyze_skeletons(branch_thresh=40* u.pix, skel_thresh=10 * u.pix, prune_criteria='length')
-        
-        # Extract the length of the skeleton. 
-        length = fil.lengths().value[0]
-        length_set.append(length)
-    return(length_set)        
     
 def radobj_maker(path, ID_set, time):
     '''
@@ -576,7 +521,12 @@ def fskel(mask, b_thresh=40, sk_thresh=20):
     unpruned_skel = fil.skeleton
     fil.analyze_skeletons(branch_thresh=b_thresh*u.pix, skel_thresh=sk_thresh*u.pix, prune_criteria='length')
     skel = fil.skeleton_longpath
-    return unpruned_skel,skel
+    length = fil.lengths().value[0]
+    return unpruned_skel,skel, length
+
+# Extract the length of the skeleton. 
+# length = fil.lengths().value[0]
+# length_set.append(length)
 
 def intersection(line1,line2,width1=3,width2=3):
     '''

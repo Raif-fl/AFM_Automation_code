@@ -136,119 +136,104 @@ def peri_area(outl_list):
         area_list.append(areas)
     return per_list, area_list
 
-def save_ind_masks(path, IDs_list, outl_new_list, time_list, img_list):
+def extract_ind_cells(IDs_list, outl_list, height_img_list, stiff_img_list, pfe_img_list):
     '''
-    A function which takes a set of images with associated timepoints, cell outlines, and cell IDs 
-    and then isolates individual cell images and masks to be saved at a specified path. It is 
-    designed to automatically organize the data within the target directory so that each image
-    has a folder named after the time the image was taken and contains seperate subfolders for the 
-    individual cell images, masks, and skeletons. 
+    A function which takes a set of height, stiffness, and peak force error images with associated 
+    timepoints, cell outlines, and cell IDs and then isolates individual cell images and masks.
+    These isolated cells are rotated so that their longest side is facing downward and are
+    then returned as a list. 
 
     Parameters
     ---------------
-    path: string
-    A string which specifies the path we want to save our individual cell images and masks. 
-    
     IDs_list: list
     A nested list that contains a list of cell IDs for each image. 
     
-    outl_new_list: list
+    outl_list: list
     A nested list that contains a list of outlines for each cell in each image. 
     
-    time_list: list
-    A list of timepoints for each image. 
+    height_img_list: list 
+    a list of height data images. 
     
-    img_list: list 
-    a list of images. 
+    stiff_img_list: list 
+    a list of stiffness data images. 
+    
+    pfe_img_list: list 
+    a list of peak force error data images. 
     '''
     # Iterate over every image and its associated time point, set of cell ids, and set of cell outlines.
-    for ID_set, outl, time, img in zip(IDs_list, outl_new_list, time_list, img_list):
-        # For each image and timepoint, make sure that there is a location to save the 
-        # cell outline, mask, and skeleton. 
-        if os.path.exists(path + str(time)) == False:
-            os.makedirs(path + str(time))
-        if os.path.exists(path + str(time) + "/cells") == False:
-            os.makedirs(path + str(time) + "/cells")
-        if os.path.exists(path + str(time) + "/masks") == False:
-            os.makedirs(path + str(time) + "/masks")
-        if os.path.exists(path + str(time) + "/skeletons") == False:
-            os.makedirs(path + str(time) + "/skeletons")
+    ind_cell_height_list = []
+    ind_cell_stiff_list = []
+    ind_cell_pfe_list = [] 
+    ind_cell_mask_list = []
+    for ID_set, outl, h_img, s_img, p_img in zip(IDs_list, outl_list, height_img_list, stiff_img_list, pfe_img_list):
+        ind_cell_height = []
+        ind_cell_stiff = []
+        ind_cell_pfe = [] 
+        ind_cell_mask = []
         # Iterate over each cell in each image. 
         for idx, cell in zip(ID_set, outl):
-            # mask outline
-            mask = np.zeros(img.shape, dtype=np.uint8)
-            channel_count = img.shape[2]  # i.e. 3 or 4 depending on your image
+            # extract the mask from the
+            mask = np.zeros(h_img.shape, dtype=np.uint8)
+            channel_count = h_img.shape[2]  # i.e. 3 or 4 depending on your image
             ignore_mask_color = (255,)*channel_count
             cv2.fillPoly(mask, [cell], ignore_mask_color)
-            masked_image = cv2.bitwise_and(img, mask)
-    
-            # crop the cell
-            x = cell.flatten()[::2]
-            y = cell.flatten()[1::2]
-            (topy, topx) = (np.min(y), np.min(x))
-            (bottomy, bottomx) = (np.max(y), np.max(x))
-            out_cell = masked_image[topy:bottomy+1, topx:bottomx+1]
-            out_mask = mask[topy:bottomy+1, topx:bottomx+1]
             
-            # save the individual cell image and cell mask. 
-            im_mask = Image.fromarray(out_mask)
-            im_mask.save(path + str(time) + "/masks" + "/" + "mask_" + str(idx) + ".png")
-            cv2.imwrite(path + str(time) + "/cells" + "/" + "cell_" + str(idx) + ".png", out_cell)
-    
-def radobj_maker(path, ID_set, time):
-    '''
-    This iterative function loads up a set of images, masks and skeletons for individual cells which were created 
-    from a set of parent images taken at different timepoints. For each of these individual cells, it then uses
-    the RadFil package to estimate the radial profile of the cell which is then saved in a list of RadFil objects.
-    
-    Parameters
-    ---------------
-    path: string
-    A string which contains the path to the individual cell images and cell masks. 
-    
-    ID_set: list
-    list that contains the cell IDs for an image.
-    
-    time: integer
-    The time point for an image. 
-    
-    Returns
-    ---------------
-    radobj_set: list
-    A list which contains a RadFil object for each cell in an image. 
-    '''
-
-    radobj_set = []
-    for idx in (ID_set):
-        # Load the image and convert to grayscale. 
-        fil_image =imageio.imread(path + str(time) + "/cells/cell_" + str(idx) + ".png")
-        fil_image = cv2.cvtColor(fil_image, cv2.COLOR_BGR2GRAY)
+            # Use the cell outline to make a new bounding box.
+            rect = cv2.minAreaRect(cell)
+            box = cv2.boxPoints(rect)
+            box = np.int0(box)
             
-        # Load the mask, convert to grayscale, and then convert the mask into a boolean array.
-        fil_mask=imageio.imread(path + str(time) + "/masks/mask_" + str(idx) + ".png")
-        fil_mask = cv2.cvtColor(fil_mask, cv2.COLOR_BGR2GRAY)
-        fil_mask = np.array(fil_mask, dtype=bool)
+            # Determine the height and width of the bounding box.
+            width = int(rect[1][0])
+            height = int(rect[1][1])
 
-        # Load the skeleton as a list of coordinates and then convert to a boolean array. 
-        skeleton = np.loadtxt(open(path + str(time) + "/skeletons/matrix_" + str(idx) + ".csv", "rb"), delimiter=",", skiprows=1)[1:-2].astype(int)
-        dbl = int((len(skeleton)-2)/2)
-        cut_skeleton = skeleton[1:-2]
-
-        x, y = [i[0] for i in cut_skeleton], [i[1] for i in cut_skeleton]
-
-        fil_skeleton = np.zeros(fil_mask.shape, dtype = bool)
-
-        for i in range(len(cut_skeleton)):
-            fil_skeleton[y[i], x[i]] = True
+            # Cut out the part of the image surrounded by the bounding box 
+            # and then rotate the image to be at a right angle for each image type.
+            src_pts = box.astype("float32")
+            dst_pts = np.array([[0, height-1],
+                                [0, 0],
+                                [width-1, 0],
+                                [width-1, height-1]], dtype="float32")
+            M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+            out_height = cv2.warpPerspective(h_img, M, (width, height))
+            out_height = cv2.copyMakeBorder(out_height, top = 5, bottom = 5, left = 5, right = 5,
+                                            borderType=cv2.BORDER_CONSTANT, value = [0])
+            out_mask = cv2.warpPerspective(mask, M, (width, height))
+            out_mask = cv2.copyMakeBorder(out_mask, top = 5, bottom = 5, left = 5, right = 5,
+                                            borderType=cv2.BORDER_CONSTANT, value = [0])
+            # It is necessary to allow for pfe or stiffness images to be not present while height images are present. 
+            if np.isnan(s_img.any()) == False:
+                out_stiff = cv2.warpPerspective(s_img, M, (width, height)) 
+                out_stiff = cv2.copyMakeBorder(out_stiff, top = 5, bottom = 5, left = 5, right = 5,
+                                                borderType=cv2.BORDER_CONSTANT, value = [0])
+            else:
+                out_stiff = np.nan
+                
+            if np.isnan(p_img.any()) == False:
+                out_pfe = cv2.warpPerspective(p_img, M, (width, height))
+                out_stiff = cv2.copyMakeBorder(out_stiff, top = 5, bottom = 5, left = 5, right = 5,
+                                               borderType=cv2.BORDER_CONSTANT, value = [0])
+            else:
+                out_pfe = np.nan 
+                
+            # If the height is greater than the width, rotate it so that the long side is horizontal. 
+            if height > width:
+                out_height = cv2.transpose(out_height)
+                out_mask = cv2.transpose(out_mask) 
+                out_stiff = cv2.transpose(out_stiff) 
+                out_pfe = cv2.transpose(out_pfe) 
             
-        # Use RadFil to create a radial profil object and then append this object to a list.
-        # The data stored in this object will be used to calculate height and radial profile along the
-        # medial axis. 
-        radobj=radfil_class.radfil(fil_image, mask=fil_mask, filspine=fil_skeleton, distance=200)
-        radobj.build_profile(samp_int=1, shift = False)
-        radobj_set.append(radobj)
-    return(radobj_set)
-
+            # Append everything into new nested lists. 
+            ind_cell_height.append(out_height)
+            ind_cell_stiff.append(out_stiff)
+            ind_cell_pfe.append(out_pfe)
+            ind_cell_mask.append(out_mask)
+        ind_cell_height_list.append(ind_cell_height)
+        ind_cell_stiff_list.append(ind_cell_stiff)
+        ind_cell_pfe_list.append(ind_cell_pfe)
+        ind_cell_mask_list.append(ind_cell_mask)
+    return(ind_cell_height_list, ind_cell_stiff_list, ind_cell_pfe_list, ind_cell_mask_list)
+    
 def find_nearest(array, value):
     '''
     Finds the nearest value in an array and returns the index of that value.
@@ -257,62 +242,77 @@ def find_nearest(array, value):
     idx = (np.abs(array - value)).argmin()
     return idx
 
-def radobj_extractor(radobj_list, h_conv = 3.9215686274509802):
+def apply_radfil(image_list, mask_list, skel_list, conv = 1.001):
     '''
-    This function iterates through a list of RadFil objects and extracts two meaningful outputs for each cell.
-    The first is a list that details the diameter of the cell along the medial axis, and the second is a list
-    that details the pixel intensity of the original image along the medial axis. This second list will reflect
-    whatever the original image was measuring (e.g. height, stiffness, brightness). 
+    This function uses the radfil package to take vertical cuts all along the skeletons created in the previous step. 
+    It then collects data from the resulting radfil objects to learn the pixel intensity along the cuts and along the skeleton,
+    the width of the cell along the skeleton, and the distance of each datapoint to the skeleton. 
     
     Parameters
-    ---------------
-    radobj_list: nested list
-    A nested list with a structure of: 
+    -------------
+    image_list: list
+    A list of images of individual cells. 
     
-    Returns
-    ---------------
-    diam_list: list
-    a nested list which contains lists of radial profiles for each cell in each image. 
+    mask_list: list
+    A list of masks which cover the individual cells in image_list
     
-    height_list: list
-    A nested list which contains lists of ridgeline height for each cell in each image. 
+    skel_list: list
+    A list of skeletons which belong to the cells in image list. 
+    
+    conv: float
+    A number which is used to convert from pixel intensity to meaningful units. 
     '''
-    # Initialize lists to hold the data for each image.
-    diam_list = []
-    height_list = []
-    profile_list = []
+    int_list = []
     dist_list = []
-    for radobj_set in radobj_list:
-        # Initialize lists to hold the data for each individual cell
-        diam_set = []
-        height_set = []
-        profile_set = []
+    width_list = []
+    ridge_list = []
+    for image_set, mask_set, skel_set in zip(image_list, mask_list, skel_list):
+        int_set = []
         dist_set = []
-        for radobj in radobj_set:
-            # Initialize lists to hold the data for each point along the skeleton. 
-            diam = []
-            height = []
-            profile = []
-            distance = []
-            for dist, prof in zip(radobj.dictionary_cuts['distance'],radobj.dictionary_cuts['profile']) :
-                # Calculate the diameter along the skeleton.
-                diam.append(np.abs(dist[0] - dist[-1]))
-                
-                # Calculate the pixel intensity along the skeleton and convert to height. 
-                ind = find_nearest(dist,0)
-                height.append(prof[ind]*h_conv)
-                profile.append(prof*h_conv)
-                distance.append(dist)
+        width_set = []
+        ridge_set = []
+        for image, mask, skel in zip(image_set, mask_set, skel_set):
+            # Load the image, mask, and skeleton
+            fil_image = image[:,:,0]
+            fil_mask = mask[:,:,0]>0
+            fil_skeleton = skel>0
             
-            profile_set.append(profile)
-            diam_set.append(diam)
-            height_set.append(height)
-            dist_set.append(distance)
-        profile_list.append(profile_set)
-        diam_list.append(diam_set)
-        height_list.append(height_set)
+            # It is required that the skeleton be slightly truncated to avoid errors.
+            # More elegant solutions may include expanding the image boundaries by 1 or two pixels, but it may be a mask problem. 
+            fil_skeleton[0,:] = False
+            fil_skeleton[:,0] = False
+            fil_skeleton[-1,:] = False
+            fil_skeleton[:,-1] = False
+            
+            # Use RadFil to create a radial profile object. 
+            radobj=radfil_class.radfil(fil_image, mask=fil_mask, filspine=fil_skeleton, distance=200)
+            radobj.build_profile(samp_int=1, shift = False)
+            
+            # Create lists to hold the information from individual cuts. 
+            intensity = []
+            ridge = []
+            for prof, dist in zip(radobj.dictionary_cuts["profile"], radobj.dictionary_cuts["distance"]):
+                # Convert all intensity values to meaningful units. 
+                intensity.append(prof*conv)
+                # Calculate the converted pixel intensities along the skeleton. 
+                ind = find_nearest(dist,0)
+                ridge.append(prof[ind]*conv)
+             
+            # Save the converted intensity and ridgeline intensity values.
+            ridge_set.append(ridge)
+            int_set.append(intensity)
+            
+            # save the distances (important for accurate spacing).
+            dist_set.append(radobj.dictionary_cuts["distance"])
+            
+            # save the widths of each cut to get the cell width along the ridgeline.
+            width_set.append(radobj.dictionary_cuts["mask_width"])
+            
+        int_list.append(int_set)
+        ridge_list.append(ridge_set)
         dist_list.append(dist_set)
-    return diam_list, height_list, profile_list, dist_list
+        width_list.append(width_set)
+    return(int_list, ridge_list, dist_list, width_list)
 
 def get_max_ID(IDs_list):
     '''
@@ -323,68 +323,35 @@ def get_max_ID(IDs_list):
         maxi.append(max(ID_set))
     return max(maxi)
 
-def get_metadata(exact_ID, IDs_list, per_list, area_list,
-                 overl_list, centers_list, time_list,
-                diam_list, height_list, profile_list,
-                 dist_list, length_list):
+def get_metadata(metadata_dict, structural_dict, exact_ID):
     '''
     Parameters
     ---------------  
-    exact_ID: integer
-    The function will generate a metadata table for a cell with this ID. 
+    metadata_dict: dictionary
+    A dictionary which contains all of the metadata that we want to collect for each cell. Note that the keys of this dictionary will
+    be used as the names for the columns. 
     
-    IDs_list: list
-    A nested list which contains a list of cell IDs for each original input image. 
+    structural_dict: dictionary
+    a dictionary which contains the time point for each image along with the cell IDs for each image. 
     
-    per_list: list
-    A nested list which contains the perimeter size of a cell in pixels for each cell in each original input image.
-    
-    area_list: list
-    A nested list which contains the area of a cell in pixels for each cell in each original input image.
-    
-    overl_list: list
-     A nested list which contains the degree of overlap for each cell in each original input image.
-    
-    centers_list: list
-    A nested list which contains lists of centroid coordinates for each cell in each original input image. 
-    
-    time_list: list
-    A list of timepoints for each image. 
-    
-    diam_list: list
-    A nested list which contains lists of radial profiles for each cell in each original input image. 
-    
-    height_list: list
-    A nested list which contains lists of ridgeline height for each cell in each original input image. 
-    
-    length_list: list
-    A nested list which contains the length of each cell skeleton in each original input image. 
+    exact_ID: Int
+    An integer which specifies the cell ID which we would like to extract a metadata table for. 
     
     Returns
     ---------------
     df: pandas dataframe
     A dataframe with parameters as columns (perimeter, area, etc) and timepoints as rows. 
     '''
-    data = []
-    for ID_set, per_set, area_set, overl_set, centers_set, time, diam_set, height_set, profile_set, dist_set, length_set in zip(IDs_list,
-                                    per_list, area_list, overl_list, centers_list, time_list,
-                                    diam_list, height_list, profile_list, dist_list, length_list):
-        if exact_ID in ID_set:
-            for idx, per, area, overl, center, diam, height, profile, dist, length in zip(ID_set,
-                                            per_set, area_set, overl_set, centers_set,
-                                            diam_set, height_set, profile_set, dist_set, length_set):
-                if idx == exact_ID:
-                    data.append(dict(zip(["time", "perimeter", "area", "overl", "location",
-                                     "diameter profile (pixels)", "Height (nm)", "Height Profile (nm)",
-                                          "Distance Profile (nm)", "length (pixels)"],
-                                        [time, per, area, overl, center, diam, height, profile, dist, length])))
-        else:
-            data.append(dict(zip(["time", "perimeter", "area", "overl", "location",
-                                     "diameter profile (pixels)", "Height (nm)",
-                                  "Height Profile (nm)", "Distance Profile (nm)", "length (pixels)"], 
-                                 [time, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan])))
-    df = pd.DataFrame(data)
-    df = df.drop_duplicates(subset = "time", ignore_index = True)
+    df = pd.DataFrame(structural_dict["Time"], columns = ["Time"])
+    for key in metadata_dict.keys():
+        data = []
+        for ID_set, value_set in zip(structural_dict["IDs"], metadata_dict[key]):
+            if exact_ID in ID_set:
+                index = np.where(np.array(ID_set) == exact_ID)[0][0]
+                data.append(value_set[index])
+            else:
+                data.append(np.nan)
+        df[key] = data
     return(df)
 
 # import the necessary packages
@@ -523,10 +490,6 @@ def fskel(mask, b_thresh=40, sk_thresh=20):
     skel = fil.skeleton_longpath
     length = fil.lengths().value[0]
     return unpruned_skel,skel, length
-
-# Extract the length of the skeleton. 
-# length = fil.lengths().value[0]
-# length_set.append(length)
 
 def intersection(line1,line2,width1=3,width2=3):
     '''

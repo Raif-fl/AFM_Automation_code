@@ -17,6 +17,11 @@ from astropy import units as u
 from radfil import radfil_class, styles
 from shapely.geometry import Polygon
 from collections import OrderedDict
+import sknw
+from networkx import shortest_path
+from scipy.signal import argrelmax
+from scipy.interpolate import splprep
+from scipy.interpolate import splev
 
 def atoi(text):
     '''
@@ -557,18 +562,20 @@ def fskel(mask, b_thresh=40, sk_thresh=20):
     
     Parameters
     -------------
-    mask = mask of an image in the form of a 2d numpy boolean array
+    mask = mask of an image (opencv image)
     b_thresh = the branch threshold which will be used inputted into fil.analyze_skeletons
     sk_thresh = the skeletonization threshold which will be inputed into fil.analyze_skeletons
     '''
-    mask = mask*255
+    mask = cv2.copyMakeBorder(mask,20,20,20,20,cv2.BORDER_CONSTANT,None,value=0)[:,:,0]>0 #add a border to the skel
     fil=FilFinder2D(mask,mask=mask)
     fil.preprocess_image(skip_flatten=True)
     fil.create_mask(use_existing_mask=True)
     fil.medskel(verbose=False)
     unpruned_skel = fil.skeleton
+    unpruned_skel = unpruned_skel[20:np.shape(unpruned_skel)[0]-20,20:np.shape(unpruned_skel)[1]-20]
     fil.analyze_skeletons(branch_thresh=b_thresh*u.pix, skel_thresh=sk_thresh*u.pix, prune_criteria='length')
     skel = fil.skeleton_longpath
+    skel = skel[20:np.shape(skel)[0]-20,20:np.shape(skel)[1]-20] #remove borders from skeletons
     return unpruned_skel,skel
 
 def intersection(line1,line2,width1=3,width2=3):
@@ -602,7 +609,7 @@ def intersection(line1,line2,width1=3,width2=3):
         else:
             return False
 
-def skeleton_to_centerline(skeleton):
+def skeleton_to_centerline(skeleton,top=False):
     '''
     Finds an ordered list of points which trace out a skeleton with no branches by following the pixels of the centerline 
     elementwise. Starts at the point farthest left and closest to the top. Ends when there are no new points on the skeleton 
@@ -613,7 +620,8 @@ def skeleton_to_centerline(skeleton):
     '''
     #initializing lists and starting parameters
     centerline=[]
-    pos = bool_sort(skeleton)[0] # finds and sorts all points where the skeleton exists. Selects leftest as initial position
+    pos0 = bool_sort(skeleton,top)[0] # finds and sorts all points where the skeleton exists. Selects leftest as initial position
+    pos = np.array(pos0)
     centerline.append(pos) #appends initial position to the centerline
     skeleton[pos[0],pos[1]]=False #erases the previous positon
     local = make_local(skeleton,pos)
@@ -622,8 +630,25 @@ def skeleton_to_centerline(skeleton):
         centerline.append(pos) #adds position to centerline
         skeleton[pos[0],pos[1]]=False #erases previous position
         local = make_local(skeleton,pos) #updates the local minor for the new position
-    return centerline
-
+    
+    local = make_local(skeleton,pos0)
+    if np.any(local): #check if another part of the centerline emerges from pos0
+        centerline2=[] #initialize a new section of the centerline
+        pos = np.array(pos0) #update position and restart the process
+        while np.any(local): #checks if there are any new positions to go to
+            pos = pos+bool_sort(local)[0]-np.array([1,1]) #updates position
+            centerline2.append(pos) #adds position to centerline
+            skeleton[pos[0],pos[1]]=False #erases previous position
+            local = make_local(skeleton,pos) #updates the local minor for the new position
+        
+        if centerline[-1][0]<centerline2[-1][0]:
+            centerline.reverse()
+            return centerline + centerline2
+        else:
+            centerline2.reverse()
+            return centerline2+centerline
+    else:
+        return centerline
 def make_local(matrix,pos):
     '''
     Extracts the 3x3 array of values around a position in an existing array. If this is not possible (if the position 
@@ -660,14 +685,237 @@ def make_local(matrix,pos):
     elif m2 ==M:
         return np.hstack((matrix[n1:n2,m1:m2],np.array([[False],[False],[False]])))
 
-def bool_sort(array):
+def bool_sort(array,top=False):
     '''
-    Sort the "True" values in a boolean array, starting from left to right, then top to bottom
+    Sort the "True" values in a boolean array, starting from left to right, then top to bottom. If top is true, then start from top to bottom, then
+    then left to right.
     Parameters
     ---------
     array = a boolean array to be sorted
+    top = whether algorithm starts at top of the figure, or the left. Default is False.
     '''
-    output = np.transpose(np.array(list(np.where(array))))
-    output = output[output[:,0].argsort()]
-    output = output[output[:,1].argsort(kind='mergesort')]
+    if top:
+        array = np.transpose(array)
+        output = list(np.where(array))
+        output.reverse()
+        output = np.transpose(np.array(output))
+        output = output[output[:,1].argsort()]
+        output = output[output[:,0].argsort(kind='mergesort')]
+    else:
+        output = np.transpose(np.array(list(np.where(array))))
+        output = output[output[:,0].argsort()]
+        output = output[output[:,1].argsort(kind='mergesort')]
     return output
+
+def pts_to_img(pts,base):
+    '''converts a list of points to a binary image, with the dimensions of the skeleton'''
+    path_in_img=np.zeros(np.shape(base))>0
+    for pt in pts:
+        path_in_img[pt[0],pt[1]]=True
+    return path_in_img        
+
+def prune2(skel,outline,poles,sensitivity=20,crop=0.1):
+    def intersection(line1,line2,width1=3,width2=3):
+        '''
+        Find if two lines intersect, or nearly intersect
+
+        Parameteres
+        -----------
+        line1,line2=boolean arrays with 'True' values where the line exists
+        width1,width2=amount (in pixels) the line should be dilated to see if a near intersection occurs
+        '''
+        if np.sum(line1+line2==2)>0:
+            return True
+        else:
+            kernel1 = cv2.getStructuringElement(cv2.MORPH_RECT,(width1,width1))
+            kernel2 = cv2.getStructuringElement(cv2.MORPH_RECT,(width2,width2))
+            dilated1 = cv2.dilate(line1.astype(np.uint8),kernel1,iterations=1)
+            dilated2 = cv2.dilate(line2.astype(np.uint8),kernel2,iterations=1)
+            return np.sum(dilated1+dilated2==2)>0
+    def crop_centerline(centerline):
+        '''crops centerline to desired length'''
+        image = centerline.copy()
+        points = skeleton_to_centerline(image,not(long))
+        crop_length=round(len(points)*crop)
+        if long:
+            if true_starts==[]:
+                left_centerline=centerline[:,0:n//2]
+                left_outline=outline[:,0:n//2]
+                if intersection(left_centerline,left_outline):
+                    points= points[crop_length:]
+            if true_ends==[]:      
+                right_centerline = centerline[:,n//2:n]
+                right_outline = outline[:,n//2:n]
+                if intersection(right_centerline,right_outline): 
+                    points = points[:len(points)-crop_length]
+            return pts_to_img(points,skel)
+        else:
+            if true_starts==[]:
+                upper_centerline=centerline[0:m//2,:]
+                upper_outline=outline[0:m//2,:]
+                if intersection(upper_centerline,upper_outline):
+                    points= points[crop_length:]
+            if true_ends==[]:      
+                lower_centerline = centerline[m//2:m,:]
+                lower_outline = outline[m//2:m,:]
+                if intersection(lower_centerline,lower_outline): 
+                    points = points[:len(centerline)-crop_length]
+                return pts_to_img(points,skel)
+    def find_splines(centerline):
+        image = centerline.copy()
+        points = skeleton_to_centerline(image,not(long))
+        if true_starts == []:
+            if true_ends == []:
+                points = [start_pole] + points + [end_pole]
+                tck,u=splprep(np.transpose(points),ub=start_pole,ue=end_pole)
+                [ys,xs]=splev(u,tck)
+            else:
+                points = [start_pole] + points
+                tck,u=splprep(np.transpose(points),ub=start_pole)
+                [ys,xs]=splev(u,tck)
+        elif true_ends ==[]:
+            points = points + [end_pole]
+            tck,u=splprep(np.transpose(points),ub=start_pole,ue=end_pole)
+            [ys,xs]=splev(u,tck)
+        else:
+            tck,u=splprep(np.transpose(points))
+            [ys,xs]=splev(u,tck)
+        return [xs,ys],u
+    if np.any(np.isnan(np.array(poles))):
+        raise ValueError('Poles must be numerical values, not np.NaN')
+    #initializing parameters
+    m = np.shape(skel)[0]
+    n = np.shape(skel)[1]
+    long = m<n #True if long axis is horizontal
+    graph = sknw.build_sknw(skel) #creating the graph from the skeleton
+    all_paths=shortest_path(graph) #shortest possible paths between the nodes in the skeleton
+    nodes = graph.nodes()
+    paths = []
+    centerlines=[]
+    curvatures=[]
+    
+    #initializing suitable starting and ending positions for the skeleton
+    if long:
+        poles.sort(key = lambda pole: pole[0])
+        start_pole = np.array([poles[0][1],poles[0][0]])
+        end_pole = np.array([poles[1][1],poles[1][0]])
+        start_nodes = list([i for i in nodes if nodes[i]['o'][1]<n//2])
+        end_nodes= list([i for i in nodes if nodes[i]['o'][1]>n//2])
+    else:
+        poles.sort(key = lambda pole: pole[1])
+        start_pole = np.array([poles[0][1],poles[0][0]])
+        end_pole = np.array([poles[1][1],poles[1][0]])
+        start_nodes = list([i for i in nodes if nodes[i]['o'][0]<m//2])
+        end_nodes= list([i for i in nodes if nodes[i]['o'][0]>m//2])
+    
+    # if there are some nodes close to the poles, check only those nodes
+    true_starts = [i for i in start_nodes if np.linalg.norm(nodes[i]['o']-np.array([poles[1][1],poles[1][0]]))<sensitivity]
+    true_ends = [i for i in end_nodes if np.linalg.norm(nodes[i]['o']-np.array([poles[0][1],poles[0][0]]))<sensitivity]
+    if true_starts != []:
+        start_nodes = true_starts
+    if true_ends !=[]:
+        end_nodes = true_ends
+    if start_nodes == [] or end_nodes == []:
+        raise ValueError('skeleton is on only one side of the cell')
+    # take all paths between starting and ending nodes
+    for b in  start_nodes:
+        for e in end_nodes:
+            path = all_paths[b][e]
+            paths.append(path)
+    if len(paths) == 1:
+        path = paths[0]
+        edges = [(path[i],path[i+1]) for i in range(len(path)-1)]
+        centerline_path = []
+        for (b,e) in edges:
+            edge = graph[b][e]['pts']
+            centerline_path = centerline_path + list(edge)
+        centerline = pts_to_img(centerline_path,skel)
+        if not (np.any(centerline)):
+            raise ValueError('Skeleton has been erased')
+        centerline = crop_centerline(centerline)
+        if not (np.any(centerline)):
+            raise ValueError('Skeleton has been erased')
+        return centerline,find_splines(centerline)
+    #convert paths (lists of nodes) to centerlines (lists of points)
+    for path in paths:
+        edges = [(path[i],path[i+1]) for i in range(len(path)-1)] #edges of the graph corresponding to the centerline
+        #initializing centerline
+        centerline_path = []
+        #calling points from the graph
+        for (b,e) in edges:
+            edge = graph[b][e]['pts']
+            centerline_path = centerline_path + list(edge)
+        #convert path to binary image
+        centerline=pts_to_img(centerline_path,skel)
+        if not (np.any(centerline)):
+            raise ValueError('Skeleton has been erased')
+        #crop the centerline, if it has a false pole
+        centerline = crop_centerline(centerline)
+        if not (np.any(centerline)):
+            raise ValueError('Skeleton has been erased')
+        # add to the list of centerlines
+        centerlines.append(centerline)
+    #calculate the maximum curvatures of each possible centerline
+    for centerline in centerlines:
+        centerline_image = centerline.copy()
+        centerline_pts = skeleton_to_centerline(centerline_image,not(long))
+        if not (np.any(centerline)):
+            raise ValueError('Skeleton has been erased')
+        tck,u = splprep(np.transpose(centerline_pts))
+        V=np.array(splev(u,tck,der=1)).T
+        A=np.array(splev(u,tck,der=2)).T
+        K = [abs(np.cross(V[i],A[i]))/(np.linalg.norm(V[i])**3) for i in range(0,len(u))]
+        curvatures.append(max(K))
+    #choose the centerline with the least maximum curvature
+    min_index=curvatures.index(min(curvatures))
+    centerline=centerlines[min_index]
+    if not (np.any(centerline)):
+        raise ValueError('Skeleton has been erased')
+    return centerline, find_splines(centerline)
+
+def radii(x,y):
+    '''
+    Finds the radius function of a 2d curve
+    '''
+    length = len(y)
+    centroid = np.array([np.sum(x),np.sum(y)])/length
+    vectors = np.transpose(np.array([x,y]))-centroid
+    return np.array([np.linalg.norm(v) for v in vectors]),centroid
+
+def explore_poles(x,y,long=True):
+    '''
+    Finds the poles (average distance of the farthest points from the centroid on a smooth closed curve) from x and y coords
+    Parameters
+    ----------
+    x = x coordinates of the curve
+    y = y coordinates of the curve
+    long = whether the cell is oriented lengthwise (default True)
+    '''
+    r,centroid = radii(x,y)
+    cx = centroid[0]
+    cy = centroid[1]
+    peaks = argrelmax(r)[0]
+    if len(peaks)<2:
+        peaks = argrelmax(r,mode='wrap')[0]
+    if long:
+        right_x_pos=[x[i] for i in peaks if x[i]>cx]
+        right_y_pos=[y[i] for i in peaks if x[i]>cx]
+        right_rads=[r[i] for i in peaks if x[i]>cx]
+        left_x_pos=[x[i] for i in peaks if x[i]<cx]
+        left_y_pos=[y[i] for i in peaks if x[i]<cx]
+        left_rads=[r[i] for i in peaks if x[i]<cx]
+        
+        average_x = np.array([np.dot(right_x_pos,right_rads)/sum(right_rads), np.dot(left_x_pos,left_rads)/sum(left_rads)])
+        average_y = np.array([np.dot(right_y_pos,right_rads)/sum(right_rads), np.dot(left_y_pos,left_rads)/sum(left_rads)])
+        return np.transpose([average_x,average_y]), centroid
+    else:
+        lower_x_pos=[x[i] for i in peaks if y[i]>cy]
+        lower_y_pos=[y[i] for i in peaks if y[i]>cy]
+        lower_rads=[r[i] for i in peaks if y[i]>cy]
+        upper_x_pos=[x[i] for i in peaks if y[i]<cy]
+        upper_y_pos=[y[i] for i in peaks if y[i]<cy]
+        upper_rads=[r[i] for i in peaks if y[i]<cy]
+        
+        average_x = np.array([np.dot(lower_x_pos,lower_rads)/sum(lower_rads), np.dot(upper_x_pos,upper_rads)/sum(upper_rads)])
+        average_y= np.array([np.dot(lower_y_pos,lower_rads)/sum(lower_rads), np.dot(upper_y_pos,upper_rads)/sum(upper_rads)])
+        return np.transpose([average_x,average_y]), centroid

@@ -11,7 +11,7 @@ import imutils
 from scipy.spatial import distance as dist
 from imutils import perspective
 import re
-import imageio
+import imageio.v2 as imageio
 from fil_finder import FilFinder2D
 from astropy import units as u
 from radfil import radfil_class, styles
@@ -22,6 +22,10 @@ from networkx import shortest_path
 from scipy.signal import argrelmax
 from scipy.interpolate import splprep
 from scipy.interpolate import splev
+from cellpose import utils
+from sklearn.neighbors import NearestNeighbors
+import networkx as nx
+from skimage.morphology import skeletonize
 
 def atoi(text):
     '''
@@ -55,7 +59,42 @@ def get_boxes(outl):
         boxes.append(box)
     return boxes
 
-def get_overlap(outl, boxes):
+
+def peri_area(outl_list):
+    '''
+    An iterative function that calculates the perimeter and area for all cell outlines within a 
+    list of images. 
+    
+    Parameters
+    ---------------
+    outl: list of 2D arrays
+    A list which contains one outline for each cell in image and arrays should 
+    contain the coordinates of the outlines. 
+    
+    Returns
+    ---------------
+    peris: list of floats
+    List should contain the perimeter size of a cell in pixels for each cell in image.
+    
+    areas: list of floats
+    List should contain the area of a cell in pixels for each cell in image.
+    '''
+    # Initialize lists to hold the perimeter and area infromation within each individual image. 
+    per_list = []
+    area_list = []
+    for outl in outl_list:
+        peris = []
+        areas = []
+        for o in outl:
+            # Calculate the perimeter and area for each outline and 
+            # append values to lists. 
+            peris.append(cv2.arcLength(o, True))
+            areas.append(cv2.contourArea(o))
+        per_list.append(peris)
+        area_list.append(areas)
+    return per_list, area_list
+
+def get_overlap(outl_list, boxes_list):
     '''
     A function which iterates over all cell outlines in an image and detects how much of the cell's
     surface is overlapping/touching another cell's. 
@@ -78,61 +117,34 @@ def get_overlap(outl, boxes):
     another cell outline. 
     
     '''
-    # initialize a list to save the overlaps
-    cell_overlaps = []
-    
-    # Loop through each cell in the image. 
-    for out_cell, box_cell in zip(outl, boxes):
-        adj = 0
-        # For each cell in the image, loop through everyother cell in the image.
-        for out_oth, box_oth in zip(outl, boxes):
-            # detect if the two cells have overlapping bounding boxes.
-            # If bounding boxes do not overlap, skip to next cell. 
-            p1 = Polygon(box_cell)
-            p2 = Polygon(box_oth)
-            if p1.intersects(p2) == False or p1 == p2:
-                continue
-            # For each pixel in cell outline, measure the distance to the pixels
-            # in the other cell outline. If said distance is zero, then the pixels
-            # are overlapping. 
-            for pixel1 in out_cell:
-                for pixel2 in out_oth:
-                    distx = np.abs(pixel1[0]-pixel2[0])
-                    disty = np.abs(pixel1[1]-pixel2[1])
-                    if distx + disty == 1:
-                        adj = adj + 1
-        # append the overlap information to our list.
-        cell_overlaps.append(adj)
-    return cell_overlaps 
-
-def peri_area(outl):
-    '''
-    An iterative function that calculates the perimeter and area for all cell outlines within a 
-    list of images. 
-    
-    Parameters
-    ---------------
-    outl: list of 2D arrays
-    A list which contains one outline for each cell in image and arrays should 
-    contain the coordinates of the outlines. 
-    
-    Returns
-    ---------------
-    peris: list of floats
-    List should contain the perimeter size of a cell in pixels for each cell in image.
-    
-    areas: list of floats
-    List should contain the area of a cell in pixels for each cell in image.
-    '''
-    # Initialize lists to hold the perimeter and area infromation within each individual image. 
-    peris = []
-    areas = []
-    for o in outl:
-        # Calculate the perimeter and area for each outline and 
-        # append values to lists. 
-        peris.append(cv2.arcLength(o, True))
-        areas.append(cv2.contourArea(o))
-    return peris, areas
+    overl_list = []
+    for outl, boxes in zip(outl_list, boxes_list):
+        # initialize a list to save the overlaps
+        cell_overlaps = []
+        # Loop through each cell in the image. 
+        for out_cell, box_cell in zip(outl, boxes):
+            adj = 0
+            # For each cell in the image, loop through everyother cell in the image.
+            for out_oth, box_oth in zip(outl, boxes):
+                # detect if the two cells have overlapping bounding boxes.
+                # If bounding boxes do not overlap, skip to next cell. 
+                p1 = Polygon(box_cell)
+                p2 = Polygon(box_oth)
+                if p1.intersects(p2) == False or p1 == p2:
+                    continue
+                # For each pixel in cell outline, measure the distance to the pixels
+                # in the other cell outline. If said distance is zero, then the pixels
+                # are overlapping. 
+                for pixel1 in out_cell:
+                    for pixel2 in out_oth:
+                        distx = np.abs(pixel1[0]-pixel2[0])
+                        disty = np.abs(pixel1[1]-pixel2[1])
+                        if distx + disty == 1:
+                            adj = adj + 1
+            # append the overlap information to our list.
+            cell_overlaps.append(adj)
+        overl_list.append(cell_overlaps)
+    return overl_list 
 
 def save_ind_masks(path, IDs_list, outl_new_list, time_list, img_list):
     '''
@@ -283,17 +295,18 @@ def radobj_maker(path, ID_set, time):
         fil_mask = np.array(fil_mask, dtype=bool)
 
         # Load the skeleton as a list of coordinates and then convert to a boolean array. 
-        skeleton = np.loadtxt(open(path + str(time) + "/skeletons/matrix_" + str(idx) + ".csv", "rb"), delimiter=",", skiprows=1)[1:-2].astype(int)
-        dbl = int((len(skeleton)-2)/2)
-        cut_skeleton = skeleton[1:-2]
+        fil_skeleton = imageio.imread(path + str(time) + '/skeletons/skeleton_' + str(idx) + '.png')>0
+        #skeleton = np.loadtxt(open(path + str(time) + "/skeletons/matrix_" + str(idx) + ".csv", "rb"), delimiter=",", skiprows=1)[1:-2].astype(int)
+        #dbl = int((len(skeleton)-2)/2)
+        #cut_skeleton = skeleton[1:-2]
 
-        x, y = [i[0] for i in cut_skeleton], [i[1] for i in cut_skeleton]
+        #x, y = [i[0] for i in cut_skeleton], [i[1] for i in cut_skeleton]
 
-        fil_skeleton = np.zeros(fil_mask.shape, dtype = bool)
+        #fil_skeleton = np.zeros(fil_mask.shape, dtype = bool)
 
-        for i in range(len(cut_skeleton)):
-            fil_skeleton[y[i], x[i]] = True
-            
+        #for i in range(len(cut_skeleton)):
+        #    fil_skeleton[y[i], x[i]] = True
+           
         # Use RadFil to create a radial profil object and then append this object to a list.
         # The data stored in this object will be used to calculate height and radial profile along the
         # medial axis. 
@@ -302,6 +315,104 @@ def radobj_maker(path, ID_set, time):
         radobj_set.append(radobj)
     return(radobj_set)
 
+
+def extract_ind_cells(IDs_list, outl_list, height_img_list):
+    '''
+    A function which takes a set of height, stiffness, and peak force error images with associated 
+    timepoints, cell outlines, and cell IDs and then isolates individual cell images and masks.
+    These isolated cells are rotated so that their longest side is facing downward and are
+    then returned as a list. 
+    Parameters
+    ---------------
+    IDs_list: list
+    A nested list that contains a list of cell IDs for each image. 
+    
+    outl_list: list
+    A nested list that contains a list of outlines for each cell in each image. 
+    
+    height_img_list: list 
+    a list of height data images. 
+    
+    stiff_img_list: list 
+    a list of stiffness data images. 
+    
+    pfe_img_list: list 
+    a list of peak force error data images. 
+    '''
+    # Iterate over every image and its associated time point, set of cell ids, and set of cell outlines.
+    ind_cell_height_list = []
+    #ind_cell_stiff_list = []
+    #ind_cell_pfe_list = [] 
+    ind_cell_mask_list = []
+    for ID_set, outl, h_img in zip(IDs_list, outl_list, height_img_list):
+        ind_cell_height = []
+        #ind_cell_stiff = []
+        #ind_cell_pfe = [] 
+        ind_cell_mask = []
+        # Iterate over each cell in each image. 
+        for idx, cell in zip(ID_set, outl):
+            # extract the mask from the
+            mask = np.zeros(h_img.shape, dtype=np.uint8)
+            channel_count = h_img.shape[2]  # i.e. 3 or 4 depending on your image
+            ignore_mask_color = (255,)*channel_count
+            cv2.fillPoly(mask, [cell], ignore_mask_color)
+            
+            # Use the cell outline to make a new bounding box.
+            rect = cv2.minAreaRect(cell)
+            box = cv2.boxPoints(rect)
+            box = np.int0(box)
+            
+            # Determine the height and width of the bounding box.
+            width = int(rect[1][0])
+            height = int(rect[1][1])
+
+            # Cut out the part of the image surrounded by the bounding box 
+            # and then rotate the image to be at a right angle for each image type.
+            src_pts = box.astype("float32")
+            dst_pts = np.array([[0, height-1],
+                                [0, 0],
+                                [width-1, 0],
+                                [width-1, height-1]], dtype="float32")
+            M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+            out_height = cv2.warpPerspective(h_img, M, (width, height))
+            out_height = cv2.copyMakeBorder(out_height, top = 5, bottom = 5, left = 5, right = 5,
+                                            borderType=cv2.BORDER_CONSTANT, value = [0])
+            out_mask = cv2.warpPerspective(mask, M, (width, height))
+            out_mask = cv2.copyMakeBorder(out_mask, top = 5, bottom = 5, left = 5, right = 5,
+                                            borderType=cv2.BORDER_CONSTANT, value = [0])
+            # It is necessary to allow for pfe or stiffness images to be not present while height images are present. 
+            #if np.isnan(s_img.any()) == False:
+            #    out_stiff = cv2.warpPerspective(s_img, M, (width, height)) 
+            #    out_stiff = cv2.copyMakeBorder(out_stiff, top = 5, bottom = 5, left = 5, right = 5,
+            #                                    borderType=cv2.BORDER_CONSTANT, value = [0])
+            #else:
+            #    out_stiff = np.nan
+                
+            #if np.isnan(p_img.any()) == False:
+            #    out_pfe = cv2.warpPerspective(p_img, M, (width, height))
+            #    out_stiff = cv2.copyMakeBorder(out_stiff, top = 5, bottom = 5, left = 5, right = 5,
+            #                                   borderType=cv2.BORDER_CONSTANT, value = [0])
+            #else:
+                #out_pfe = np.nan 
+                
+            # If the height is greater than the width, rotate it so that the long side is horizontal. 
+            if height > width:
+                out_height = cv2.transpose(out_height)
+                out_mask = cv2.transpose(out_mask) 
+                #out_stiff = cv2.transpose(out_stiff) 
+                #out_pfe = cv2.transpose(out_pfe) 
+            
+            # Append everything into new nested lists. 
+            ind_cell_height.append(out_height)
+            #ind_cell_stiff.append(out_stiff)
+            #ind_cell_pfe.append(out_pfe)
+            ind_cell_mask.append(out_mask)
+        ind_cell_height_list.append(ind_cell_height)
+        #ind_cell_stiff_list.append(ind_cell_stiff)
+        #ind_cell_pfe_list.append(ind_cell_pfe)
+        ind_cell_mask_list.append(ind_cell_mask)
+    return(ind_cell_height_list, ind_cell_mask_list)
+
 def find_nearest(array, value):
     '''
     Finds the nearest value in an array and returns the index of that value.
@@ -309,6 +420,77 @@ def find_nearest(array, value):
     array = np.asarray(array)
     idx = (np.abs(array - value)).argmin()
     return idx
+def apply_radfil(image_list, mask_list, skel_list, conv = 1.001):
+    '''
+    This function uses the radfil package to take vertical cuts all along the skeletons created in the previous step. 
+    It then collects data from the resulting radfil objects to learn the pixel intensity along the cuts and along the skeleton,
+    the width of the cell along the skeleton, and the distance of each datapoint to the skeleton. 
+    
+    Parameters
+    -------------
+    image_list: list
+    A list of images of individual cells. 
+    
+    mask_list: list
+    A list of masks which cover the individual cells in image_list
+    
+    skel_list: list
+    A list of skeletons which belong to the cells in image list. 
+    
+    conv: float
+    A number which is used to convert from pixel intensity to meaningful units. 
+    '''
+    int_list = []
+    dist_list = []
+    width_list = []
+    ridge_list = []
+    for image_set, mask_set, skel_set in zip(image_list, mask_list, skel_list):
+        int_set = []
+        dist_set = []
+        width_set = []
+        ridge_set = []
+        for image, mask, skel in zip(image_set, mask_set, skel_set):
+            # Load the image, mask, and skeleton
+            fil_image = image[:,:,0]
+            fil_mask = mask[:,:,0]>0
+            fil_skeleton = skel>0
+            
+            # It is required that the skeleton be slightly truncated to avoid errors.
+            # More elegant solutions may include expanding the image boundaries by 1 or two pixels, but it may be a mask problem. 
+            fil_skeleton[0,:] = False
+            fil_skeleton[:,0] = False
+            fil_skeleton[-1,:] = False
+            fil_skeleton[:,-1] = False
+            
+            # Use RadFil to create a radial profile object. 
+            radobj=radfil_class.radfil(fil_image, mask=fil_mask, filspine=fil_skeleton, distance=200)
+            radobj.build_profile(samp_int=1, shift = False)
+            
+            # Create lists to hold the information from individual cuts. 
+            intensity = []
+            ridge = []
+            for prof, dist in zip(radobj.dictionary_cuts["profile"], radobj.dictionary_cuts["distance"]):
+                # Convert all intensity values to meaningful units. 
+                intensity.append(prof*conv)
+                # Calculate the converted pixel intensities along the skeleton. 
+                ind = find_nearest(dist,0)
+                ridge.append(prof[ind]*conv)
+             
+            # Save the converted intensity and ridgeline intensity values.
+            ridge_set.append(ridge)
+            int_set.append(intensity)
+            
+            # save the distances (important for accurate spacing).
+            dist_set.append(radobj.dictionary_cuts["distance"])
+            
+            # save the widths of each cut to get the cell width along the ridgeline.
+            width_set.append(radobj.dictionary_cuts["mask_width"])
+            
+        int_list.append(int_set)
+        ridge_list.append(ridge_set)
+        dist_list.append(dist_set)
+        width_list.append(width_set)
+    return(int_list, ridge_list, dist_list, width_list)
 
 def radobj_extractor(radobj_list, h_conv = 3.9215686274509802):
     '''
@@ -376,68 +558,35 @@ def get_max_ID(IDs_list):
         maxi.append(max(ID_set))
     return max(maxi)
 
-def get_metadata(exact_ID, IDs_list, per_list, area_list,
-                 overl_list, centers_list, time_list,
-                diam_list, height_list, profile_list,
-                 dist_list, length_list):
+def get_metadata(metadata_dict, structural_dict, exact_ID):
     '''
     Parameters
     ---------------  
-    exact_ID: integer
-    The function will generate a metadata table for a cell with this ID. 
+    metadata_dict: dictionary
+    A dictionary which contains all of the metadata that we want to collect for each cell. Note that the keys of this dictionary will
+    be used as the names for the columns. 
     
-    IDs_list: list
-    A nested list which contains a list of cell IDs for each original input image. 
+    structural_dict: dictionary
+    a dictionary which contains the time point for each image along with the cell IDs for each image. 
     
-    per_list: list
-    A nested list which contains the perimeter size of a cell in pixels for each cell in each original input image.
-    
-    area_list: list
-    A nested list which contains the area of a cell in pixels for each cell in each original input image.
-    
-    overl_list: list
-     A nested list which contains the degree of overlap for each cell in each original input image.
-    
-    centers_list: list
-    A nested list which contains lists of centroid coordinates for each cell in each original input image. 
-    
-    time_list: list
-    A list of timepoints for each image. 
-    
-    diam_list: list
-    A nested list which contains lists of radial profiles for each cell in each original input image. 
-    
-    height_list: list
-    A nested list which contains lists of ridgeline height for each cell in each original input image. 
-    
-    length_list: list
-    A nested list which contains the length of each cell skeleton in each original input image. 
+    exact_ID: Int
+    An integer which specifies the cell ID which we would like to extract a metadata table for. 
     
     Returns
     ---------------
     df: pandas dataframe
     A dataframe with parameters as columns (perimeter, area, etc) and timepoints as rows. 
     '''
-    data = []
-    for ID_set, per_set, area_set, overl_set, centers_set, time, diam_set, height_set, profile_set, dist_set, length_set in zip(IDs_list,
-                                    per_list, area_list, overl_list, centers_list, time_list,
-                                    diam_list, height_list, profile_list, dist_list, length_list):
-        if exact_ID in ID_set:
-            for idx, per, area, overl, center, diam, height, profile, dist, length in zip(ID_set,
-                                            per_set, area_set, overl_set, centers_set,
-                                            diam_set, height_set, profile_set, dist_set, length_set):
-                if idx == exact_ID:
-                    data.append(dict(zip(["time", "perimeter", "area", "overl", "location",
-                                     "diameter profile (pixels)", "Height (nm)", "Height Profile (nm)",
-                                          "Distance Profile (nm)", "length (pixels)"],
-                                        [time, per, area, overl, center, diam, height, profile, dist, length])))
-        else:
-            data.append(dict(zip(["time", "perimeter", "area", "overl", "location",
-                                     "diameter profile (pixels)", "Height (nm)",
-                                  "Height Profile (nm)", "Distance Profile (nm)", "length (pixels)"], 
-                                 [time, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan])))
-    df = pd.DataFrame(data)
-    df = df.drop_duplicates(subset = "time", ignore_index = True)
+    df = pd.DataFrame(structural_dict["Time"], columns = ["Time"])
+    for key in metadata_dict.keys():
+        data = []
+        for ID_set, value_set in zip(structural_dict["IDs"], metadata_dict[key]):
+            if exact_ID in ID_set:
+                index = np.where(np.array(ID_set) == exact_ID)[0][0]
+                data.append(value_set[index])
+            else:
+                data.append(np.nan)
+        df[key] = data
     return(df)
 
 # import the necessary packages
@@ -558,7 +707,7 @@ class CentroidTracker():
     
 def fskel(mask, b_thresh=40, sk_thresh=20):
     '''
-    Takes a mask in the form of a numpy boolean array. It returns a filfinder skeleton and a pruned filfinder skeleton.
+    Takes a mask in the form of a numpy boolean array. It returns a filfinder skeleton.
     
     Parameters
     -------------
@@ -573,10 +722,24 @@ def fskel(mask, b_thresh=40, sk_thresh=20):
     fil.medskel(verbose=False)
     unpruned_skel = fil.skeleton
     unpruned_skel = unpruned_skel[20:np.shape(unpruned_skel)[0]-20,20:np.shape(unpruned_skel)[1]-20]
-    fil.analyze_skeletons(branch_thresh=b_thresh*u.pix, skel_thresh=sk_thresh*u.pix, prune_criteria='length')
-    skel = fil.skeleton_longpath
-    skel = skel[20:np.shape(skel)[0]-20,20:np.shape(skel)[1]-20] #remove borders from skeletons
-    return unpruned_skel,skel
+    return unpruned_skel
+
+def padskel(mask):
+    '''
+    Runs skimage.morphology.skeletonize on a padded version of the mask, to avoid errors.
+    
+    Parameters
+    ----------
+    mask = a mask (opencv image)
+    
+    Returns
+    -------
+    skel = a skelegon (boolean array)
+    '''
+    mask = cv2.copyMakeBorder(mask,20,20,20,20,cv2.BORDER_CONSTANT,None,value=0)[:,:,0]>0 #add a border to the skel
+    skel = skeletonize(mask)
+    skel = skel[20:np.shape(skel)[0]-20,20:np.shape(skel)[1]-20]
+    return skel
 
 def intersection(line1,line2,width1=3,width2=3):
     '''
@@ -587,29 +750,18 @@ def intersection(line1,line2,width1=3,width2=3):
     line1,line2=boolean arrays with 'True' values where the line exists
     width1,width2=amount (in pixels) the line should be dilated to see if a near intersection occurs
     '''
-    m=np.shape(line1)[1]
-    n=np.shape(line1)[0]
-    d=m//2
-    l_check = np.sum(line1[0:n,0:d]+line2[0:n,0:d]==2)>0
-    r_check = np.sum(line1[0:n,d:m-1]+line2[0:n,d:m-1]==2)>0
-    if l_check and r_check:
+    check = np.sum(line1+line2==2)>0
+    if check:
         return True
     else:
         kernel1 = cv2.getStructuringElement(cv2.MORPH_RECT,(width1,width1))
         kernel2 = cv2.getStructuringElement(cv2.MORPH_RECT,(width2,width2))
         dilated1 = cv2.dilate(line1.astype(np.uint8),kernel1,iterations=1)
         dilated2 = cv2.dilate(line2.astype(np.uint8),kernel2,iterations=1)
-        m=np.shape(line1)[1]
-        n=np.shape(line1)[0]
-        d=m//2
-        l_check = np.sum(dilated1[0:n,0:d]+dilated2[0:n,0:d]==2)>0
-        r_check = np.sum(dilated1[0:n,d:m-1]+dilated2[0:n,d:m-1]==2)>0
-        if l_check and r_check:
-            return True
-        else:
-            return False
+        check = np.sum(dilated1+dilated2==2)>0
+        return check
 
-def skeleton_to_centerline(skeleton,top=False):
+def skeleton_to_centerline(skeleton,axis=False):
     '''
     Finds an ordered list of points which trace out a skeleton with no branches by following the pixels of the centerline 
     elementwise. Starts at the point farthest left and closest to the top. Ends when there are no new points on the skeleton 
@@ -617,38 +769,48 @@ def skeleton_to_centerline(skeleton,top=False):
     Parameters
     ----------
     skel = a 2d numpy boolean array representing a topological skeleton with no branches
+    axis = if true start by finding the min point on the 0 (top-bottom) axis, then 0 (left-right) axis. If false, vice verse. Default False.
     '''
     #initializing lists and starting parameters
-    centerline=[]
-    pos0 = bool_sort(skeleton,top)[0] # finds and sorts all points where the skeleton exists. Selects leftest as initial position
-    pos = np.array(pos0)
-    centerline.append(pos) #appends initial position to the centerline
-    skeleton[pos[0],pos[1]]=False #erases the previous positon
-    local = make_local(skeleton,pos)
-    while np.any(local): #checks if there are any new positions to go to
-        pos = pos+bool_sort(local)[0]-np.array([1,1]) #updates position
-        centerline.append(pos) #adds position to centerline
-        skeleton[pos[0],pos[1]]=False #erases previous position
-        local = make_local(skeleton,pos) #updates the local minor for the new position
+    centerline = bool_sort(skeleton,axis) # finds and sorts all points where the skeleton exists. Selects leftest as initial position
+    centerline = reorder_opt(centerline)
+    return list(centerline)
+
+def reorder_opt(points,NN=5):
+    '''
+    Find the optimal order of a set of points in an image
     
-    local = make_local(skeleton,pos0)
-    if np.any(local): #check if another part of the centerline emerges from pos0
-        centerline2=[] #initialize a new section of the centerline
-        pos = np.array(pos0) #update position and restart the process
-        while np.any(local): #checks if there are any new positions to go to
-            pos = pos+bool_sort(local)[0]-np.array([1,1]) #updates position
-            centerline2.append(pos) #adds position to centerline
-            skeleton[pos[0],pos[1]]=False #erases previous position
-            local = make_local(skeleton,pos) #updates the local minor for the new position
-        
-        if centerline[-1][0]<centerline2[-1][0]:
-            centerline.reverse()
-            return centerline + centerline2
-        else:
-            centerline2.reverse()
-            return centerline2+centerline
-    else:
-        return centerline
+    Paramters
+    ---------
+    points = an Nx2 array-like corresponing to a set of points
+    
+    Returns
+    --------
+    points = an ordered list of points
+    '''
+    #find the nearest neighbour of each point
+    points = np.array(points)
+    clf=NearestNeighbors(n_neighbors=NN).fit(points)
+    G = clf.kneighbors_graph()
+    T = nx.from_scipy_sparse_array(G)
+
+    mindist = np.inf
+    minidx = 0
+
+    order = list(nx.dfs_preorder_nodes(T, 0))
+    paths = [list(nx.dfs_preorder_nodes(T, i)) for i in range(len(points))]
+    
+    for i in range(len(points)):
+        p = paths[i]           # order of nodes
+        ordered = points[p]    # ordered nodes
+        # find cost of that order by the sum of euclidean distances between points (i) and (i+1)
+        cost = (((ordered[:-1] - ordered[1:])**2).sum(1)).sum()
+        if cost < mindist:
+            mindist = cost
+            minidx = i
+    opt_order = paths[minidx]
+    return list(points[opt_order,:])
+
 def make_local(matrix,pos):
     '''
     Extracts the 3x3 array of values around a position in an existing array. If this is not possible (if the position 
@@ -685,132 +847,119 @@ def make_local(matrix,pos):
     elif m2 ==M:
         return np.hstack((matrix[n1:n2,m1:m2],np.array([[False],[False],[False]])))
 
-def bool_sort(array,top=False):
+def bool_sort(array,axis=True):
     '''
     Sort the "True" values in a boolean array, starting from left to right, then top to bottom. If top is true, then start from top to bottom, then
     then left to right.
     Parameters
     ---------
     array = a boolean array to be sorted
-    top = whether algorithm starts at top of the figure, or the left. Default is False.
+    axis = which axis is whose lowest values are put first, default True. If True put the 0 (top-bottom) axis first, if False put the 1 (left-right) axis first.
     '''
-    if top:
-        array = np.transpose(array)
-        output = list(np.where(array))
-        output.reverse()
-        output = np.transpose(np.array(output))
+    if axis:
+        output = np.transpose(np.where(array))
         output = output[output[:,1].argsort()]
         output = output[output[:,0].argsort(kind='mergesort')]
     else:
-        output = np.transpose(np.array(list(np.where(array))))
+        output = np.transpose(np.where(array))
         output = output[output[:,0].argsort()]
         output = output[output[:,1].argsort(kind='mergesort')]
     return output
 
 def pts_to_img(pts,base):
     '''converts a list of points to a binary image, with the dimensions of the skeleton'''
-    path_in_img=np.zeros(np.shape(base))>0
+    path_in_img=np.zeros(np.shape(base)).astype(bool)
     for pt in pts:
         path_in_img[pt[0],pt[1]]=True
-    return path_in_img        
+    return path_in_img 
 
-def prune2(skel,outline,poles,sensitivity=20,crop=0.1):
-    def intersection(line1,line2,width1=3,width2=3):
-        '''
-        Find if two lines intersect, or nearly intersect
-
-        Parameteres
-        -----------
-        line1,line2=boolean arrays with 'True' values where the line exists
-        width1,width2=amount (in pixels) the line should be dilated to see if a near intersection occurs
-        '''
-        if np.sum(line1+line2==2)>0:
-            return True
-        else:
-            kernel1 = cv2.getStructuringElement(cv2.MORPH_RECT,(width1,width1))
-            kernel2 = cv2.getStructuringElement(cv2.MORPH_RECT,(width2,width2))
-            dilated1 = cv2.dilate(line1.astype(np.uint8),kernel1,iterations=1)
-            dilated2 = cv2.dilate(line2.astype(np.uint8),kernel2,iterations=1)
-            return np.sum(dilated1+dilated2==2)>0
-    def crop_centerline(centerline):
-        '''crops centerline to desired length'''
-        image = centerline.copy()
-        points = skeleton_to_centerline(image,not(long))
-        crop_length=round(len(points)*crop)
-        if long:
-            if true_starts==[]:
-                left_centerline=centerline[:,0:n//2]
-                left_outline=outline[:,0:n//2]
-                if intersection(left_centerline,left_outline):
-                    points= points[crop_length:]
-            if true_ends==[]:      
-                right_centerline = centerline[:,n//2:n]
-                right_outline = outline[:,n//2:n]
-                if intersection(right_centerline,right_outline): 
-                    points = points[:len(points)-crop_length]
-            return pts_to_img(points,skel)
-        else:
-            if true_starts==[]:
-                upper_centerline=centerline[0:m//2,:]
-                upper_outline=outline[0:m//2,:]
-                if intersection(upper_centerline,upper_outline):
-                    points= points[crop_length:]
-            if true_ends==[]:      
-                lower_centerline = centerline[m//2:m,:]
-                lower_outline = outline[m//2:m,:]
-                if intersection(lower_centerline,lower_outline): 
-                    points = points[:len(centerline)-crop_length]
-                return pts_to_img(points,skel)
-    def find_splines(centerline):
-        image = centerline.copy()
-        points = skeleton_to_centerline(image,not(long))
+def prune2(skel,outline,mask,poles,sensitivity=20,crop=0.1):
+    def crop_centerline(centerline_path):
+        '''Crops a proportion of the points (determined by the crop parameter) from the ends of a centerline with a false pole'''
+        crop_length=round(len(centerline_path)*crop)
+        image = pts_to_img(centerline_path,skel)
         if true_starts == []:
-            if true_ends == []:
-                points = [start_pole] + points + [end_pole]
-                tck,u=splprep(np.transpose(points),ub=start_pole,ue=end_pole)
-                [ys,xs]=splev(u,tck)
+            if axis:
+                start_centerline = image[:,0:N//2]
+                start_outline = outline[:,0:N//2]
             else:
-                points = [start_pole] + points
-                tck,u=splprep(np.transpose(points),ub=start_pole)
-                [ys,xs]=splev(u,tck)
-        elif true_ends ==[]:
-            points = points + [end_pole]
-            tck,u=splprep(np.transpose(points),ub=start_pole,ue=end_pole)
-            [ys,xs]=splev(u,tck)
-        else:
-            tck,u=splprep(np.transpose(points))
-            [ys,xs]=splev(u,tck)
-        return [xs,ys],u
+                start_centerline=image[0:M//2,:]
+                start_outline=outline[0:M//2,:]
+            if intersection(start_centerline,start_outline):
+                centerline_path= centerline_path[crop_length:]
+
+        if true_ends == []:
+            if axis:
+                end_centerline = image[:,N//2:N]
+                end_outline = outline[:,N//2:N]
+            else:
+                end_centerline = image[M//2:M,:]
+                end_outline = outline[M//2:M,:]
+            if intersection(end_centerline,end_outline): 
+                centerline_path = centerline_path[:len(centerline_path)-crop_length]
+        return centerline_path
+    def find_splines(points):
+        s = np.linspace(0,1,1000)
+        # remove repeated points
+        diff = np.diff(points,axis=0)==0
+        repeated = np.where(np.array([pt[0] and pt[1] for pt in diff]))
+        points = list(np.delete(points,repeated,axis=0))
+        if true_starts ==[]:
+            points = [np.array([start_pole[1],start_pole[0]])] + points
+        if true_ends ==[]:
+            points = points + [np.array([end_pole[1],end_pole[0]])]
+        tck,U=splprep(np.transpose(points))
+        s = np.linspace(0,1,1000)
+        [ys,xs]= splev(s,tck)
+        return [xs,ys],s
+    def in_mask (path,mask):
+        '''
+        Returns values of a path which are in a mask
+        Parameters:
+        ---------
+        path = numpy array consisting of coordinates in the mask
+        mask = numpy boolean array, showing the mask
+        '''
+        #first remove all values that are not in the picture
+        not_in_img =[not(pt[0]<np.shape(mask)[0]-1 and pt[0]>=0 and pt[1]<np.shape(mask)[1]-1 and pt[1]>=0) for pt in path]
+        if False in not_in_img:
+            not_in_img = np.where(not_in_img)
+            path = np.delete(path,not_in_img,0)
+        #next remove all values which are not in the mask
+        not_in_mask = []
+        for i in range (0,len(path)):
+            pt = path[i]
+            if mask[pt[0],pt[1]]:
+                continue
+            else:
+                not_in_mask.append(i)
+        return np.delete(path,not_in_mask,0)
     if np.any(np.isnan(np.array(poles))):
         raise ValueError('Poles must be numerical values, not np.NaN')
     #initializing parameters
     m = np.shape(skel)[0]
     n = np.shape(skel)[1]
-    long = m<n #True if long axis is horizontal
+    axis = m<n
+    poles = list(poles)
     graph = sknw.build_sknw(skel) #creating the graph from the skeleton
     all_paths=shortest_path(graph) #shortest possible paths between the nodes in the skeleton
     nodes = graph.nodes()
+    [start_pole,end_pole] = poles
     paths = []
     centerlines=[]
-    curvatures=[]
+    lengths=[]
     
     #initializing suitable starting and ending positions for the skeleton
-    if long:
-        poles.sort(key = lambda pole: pole[0])
-        start_pole = np.array([poles[0][1],poles[0][0]])
-        end_pole = np.array([poles[1][1],poles[1][0]])
+    if axis:
         start_nodes = list([i for i in nodes if nodes[i]['o'][1]<n//2])
         end_nodes= list([i for i in nodes if nodes[i]['o'][1]>n//2])
     else:
-        poles.sort(key = lambda pole: pole[1])
-        start_pole = np.array([poles[0][1],poles[0][0]])
-        end_pole = np.array([poles[1][1],poles[1][0]])
         start_nodes = list([i for i in nodes if nodes[i]['o'][0]<m//2])
         end_nodes= list([i for i in nodes if nodes[i]['o'][0]>m//2])
     
     # if there are some nodes close to the poles, check only those nodes
-    true_starts = [i for i in start_nodes if np.linalg.norm(nodes[i]['o']-np.array([poles[1][1],poles[1][0]]))<sensitivity]
-    true_ends = [i for i in end_nodes if np.linalg.norm(nodes[i]['o']-np.array([poles[0][1],poles[0][0]]))<sensitivity]
+    true_starts = [i for i in start_nodes if np.linalg.norm(nodes[i]['o']-np.array([start_pole[1],start_pole[0]]))<sensitivity]
+    true_ends = [i for i in end_nodes if np.linalg.norm(nodes[i]['o']-np.array([end_pole[1],end_pole[0]]))<sensitivity]
     if true_starts != []:
         start_nodes = true_starts
     if true_ends !=[]:
@@ -824,18 +973,28 @@ def prune2(skel,outline,poles,sensitivity=20,crop=0.1):
             paths.append(path)
     if len(paths) == 1:
         path = paths[0]
-        edges = [(path[i],path[i+1]) for i in range(len(path)-1)]
+        edges = [(path[i],path[i+1]) for i in range(len(path)-1)] #edges of the graph corresponding to the centerline
+        #initializing centerline
         centerline_path = []
+        #calling points from the graph
         for (b,e) in edges:
             edge = graph[b][e]['pts']
             centerline_path = centerline_path + list(edge)
-        centerline = pts_to_img(centerline_path,skel)
-        if not (np.any(centerline)):
+        if len(centerline_path)==0:
             raise ValueError('Skeleton has been erased')
-        centerline = crop_centerline(centerline)
-        if not (np.any(centerline)):
+        centerline_path=reorder_opt(np.array(centerline_path))
+        if np.linalg.norm(np.array([centerline_path[0][1],centerline_path[0][0]])-end_pole) < np.linalg.norm(np.array([centerline_path[0][1],centerline_path[0][0]])-start_pole):
+            centerline_path.reverse()
+        centerline_path = crop_centerline(list(centerline_path))
+        if len(centerline_path)<=5:
             raise ValueError('Skeleton has been erased')
-        return centerline,find_splines(centerline)
+        centerline_path = reorder_opt(np.array(centerline_path))
+        [xs,ys],u = find_splines(centerline_path)
+        path = np.round(np.transpose(np.array([ys,xs]))).astype(np.uint32)
+        path = in_mask(path,mask)
+        length = arc_length([xs,ys])
+        pruned_skel = pts_to_img(path,skel)
+        return pruned_skel, length, [xs,ys],np.linspace(0,1,100)
     #convert paths (lists of nodes) to centerlines (lists of points)
     for path in paths:
         edges = [(path[i],path[i+1]) for i in range(len(path)-1)] #edges of the graph corresponding to the centerline
@@ -846,58 +1005,73 @@ def prune2(skel,outline,poles,sensitivity=20,crop=0.1):
             edge = graph[b][e]['pts']
             centerline_path = centerline_path + list(edge)
         #convert path to binary image
-        centerline=pts_to_img(centerline_path,skel)
-        if not (np.any(centerline)):
+        if len(centerline_path)==0:
             raise ValueError('Skeleton has been erased')
         #crop the centerline, if it has a false pole
-        centerline = crop_centerline(centerline)
-        if not (np.any(centerline)):
-            raise ValueError('Skeleton has been erased')
-        # add to the list of centerlines
-        centerlines.append(centerline)
-    #calculate the maximum curvatures of each possible centerline
-    for centerline in centerlines:
-        centerline_image = centerline.copy()
-        centerline_pts = skeleton_to_centerline(centerline_image,not(long))
-        if not (np.any(centerline)):
-            raise ValueError('Skeleton has been erased')
-        tck,u = splprep(np.transpose(centerline_pts))
-        V=np.array(splev(u,tck,der=1)).T
-        A=np.array(splev(u,tck,der=2)).T
-        K = [abs(np.cross(V[i],A[i]))/(np.linalg.norm(V[i])**3) for i in range(0,len(u))]
-        curvatures.append(max(K))
-    #choose the centerline with the least maximum curvature
-    min_index=curvatures.index(min(curvatures))
-    centerline=centerlines[min_index]
-    if not (np.any(centerline)):
+        centerline_path=reorder_opt(np.array(centerline_path))
+        if np.linalg.norm(np.array([centerline_path[0][1],centerline_path[0][0]])-end_pole) < np.linalg.norm(np.array([centerline_path[0][1],centerline_path[0][0]])-start_pole):
+            centerline_path.reverse()
+        centerline_path = crop_centerline(list(centerline_path))
+        #find the length of each centerline
+        length = len(centerline_path)
+        # add to the list of centerlines and lengths
+        centerlines.append(centerline_path)
+        lengths.append(length)
+    #choose the longest centerline
+    max_index=lengths.index(max(lengths))
+    centerline_path=centerlines[max_index]
+    if len(centerline_path)<=5:
         raise ValueError('Skeleton has been erased')
-    return centerline, find_splines(centerline)
+    [xs,ys],u = find_splines(centerline_path)
+    path = np.round(np.transpose(np.array([ys,xs]))).astype(np.uint32)
+    path = in_mask(path,mask)
+    pruned_skel = pts_to_img(path,skel)
+    length = arc_length([xs,ys])
+    return pruned_skel, length, [xs,ys], u
 
 def radii(x,y):
     '''
     Finds the radius function of a 2d curve
+    
+    Parameters
+    ---------
+    x,y = coordinates of the curve
+    
+    Returns
+    -------
+    r = a 1D array containing the distance to the centroid of the curve for each x and y
+    centroid = the centroid of the curve
     '''
     length = len(y)
     centroid = np.array([np.sum(x),np.sum(y)])/length
     vectors = np.transpose(np.array([x,y]))-centroid
     return np.array([np.linalg.norm(v) for v in vectors]),centroid
 
-def explore_poles(x,y,long=True):
+def explore_poles(outline,axis=True):
     '''
     Finds the poles (average distance of the farthest points from the centroid on a smooth closed curve) from x and y coords
     Parameters
     ----------
-    x = x coordinates of the curve
-    y = y coordinates of the curve
-    long = whether the cell is oriented lengthwise (default True)
+    outline = boolean array representing the outline of the cell
+    axis = which axis the poles are found with respect to. True for the 0 (left-right) axis, False for the 1 (top-bottom) axis
+    
+    Returns
+    --------
+    poles 
     '''
+    #find points. Want to start on the axis we wish to find them on
+    outline_pts = bool_sort(outline,axis)
+    outline_pts = reorder_opt(outline_pts,NN=2)
+    outline_pts = outline_pts + [outline_pts[0]]
+    tck,U=splprep(np.transpose(outline_pts),per=1)
+    [y,x] = splev(U,tck)
     r,centroid = radii(x,y)
     cx = centroid[0]
     cy = centroid[1]
-    peaks = argrelmax(r)[0]
+    peaks = list(argrelmax(r)[0])
     if len(peaks)<2:
-        peaks = argrelmax(r,mode='wrap')[0]
-    if long:
+        peaks = peaks+[0,-1]
+    if axis:
         right_x_pos=[x[i] for i in peaks if x[i]>cx]
         right_y_pos=[y[i] for i in peaks if x[i]>cx]
         right_rads=[r[i] for i in peaks if x[i]>cx]
@@ -905,9 +1079,9 @@ def explore_poles(x,y,long=True):
         left_y_pos=[y[i] for i in peaks if x[i]<cx]
         left_rads=[r[i] for i in peaks if x[i]<cx]
         
-        average_x = np.array([np.dot(right_x_pos,right_rads)/sum(right_rads), np.dot(left_x_pos,left_rads)/sum(left_rads)])
-        average_y = np.array([np.dot(right_y_pos,right_rads)/sum(right_rads), np.dot(left_y_pos,left_rads)/sum(left_rads)])
-        return np.transpose([average_x,average_y]), centroid
+        left_pole = np.array([np.dot(left_x_pos,left_rads)/sum(left_rads),np.dot(left_y_pos,left_rads)/sum(left_rads)])
+        right_pole = np.array([np.dot(right_x_pos,right_rads)/sum(right_rads),np.dot(right_y_pos,right_rads)/sum(right_rads)])
+        return np.array([left_pole,right_pole]), centroid
     else:
         lower_x_pos=[x[i] for i in peaks if y[i]>cy]
         lower_y_pos=[y[i] for i in peaks if y[i]>cy]
@@ -916,6 +1090,34 @@ def explore_poles(x,y,long=True):
         upper_y_pos=[y[i] for i in peaks if y[i]<cy]
         upper_rads=[r[i] for i in peaks if y[i]<cy]
         
-        average_x = np.array([np.dot(lower_x_pos,lower_rads)/sum(lower_rads), np.dot(upper_x_pos,upper_rads)/sum(upper_rads)])
-        average_y= np.array([np.dot(lower_y_pos,lower_rads)/sum(lower_rads), np.dot(upper_y_pos,upper_rads)/sum(upper_rads)])
-        return np.transpose([average_x,average_y]), centroid
+        upper_pole = np.array([np.dot(upper_x_pos,upper_rads)/sum(upper_rads),np.dot(upper_y_pos,upper_rads)/sum(upper_rads)])
+        lower_pole= np.array([np.dot(lower_x_pos,lower_rads)/sum(lower_rads),np.dot(lower_y_pos,lower_rads)/sum(lower_rads)])
+        return list(np.transpose([upper_pole,lower_pole])), centroid
+
+def arc_length(pts):
+    '''
+    Find the arclength of a curve given by a set of points
+    Paramters
+    --------
+    pts = array-like coordinates [x1,x2,....]
+    '''
+    pts = np.array(np.transpose(pts))
+    lengths = []
+    for i in range (1,len(pts)):
+        length = np.linalg.norm(pts[i] - pts[i-1])
+        lengths.append(length)
+    return np.sum(lengths)
+
+def arc_length(pts):
+    '''
+    Find the arclength of a curve given by a set of points
+    Paramters
+    --------
+    pts = array-like coordinates [x1,x2,....]
+    '''
+    pts = np.array(np.transpose(pts))
+    lengths = []
+    for i in range (1,len(pts)):
+        length = np.linalg.norm(pts[i] - pts[i-1])
+        lengths.append(length)
+    return np.sum(lengths)

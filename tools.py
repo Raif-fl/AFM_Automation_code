@@ -26,6 +26,7 @@ from cellpose import utils
 from sklearn.neighbors import NearestNeighbors
 import networkx as nx
 from skimage.morphology import skeletonize
+import warnings
 
 def atoi(text):
     '''
@@ -734,7 +735,7 @@ def padskel(mask):
     
     Returns
     -------
-    skel = a skelegon (boolean array)
+    skel = a skeleton (boolean array)
     '''
     mask = cv2.copyMakeBorder(mask,20,20,20,20,cv2.BORDER_CONSTANT,None,value=0)[:,:,0]>0 #add a border to the skel
     skel = skeletonize(mask)
@@ -870,35 +871,88 @@ def pts_to_img(pts,base):
     '''converts a list of points to a binary image, with the dimensions of the skeleton'''
     path_in_img=np.zeros(np.shape(base)).astype(bool)
     for pt in pts:
+        pt = pt.astype(np.uint16)
         path_in_img[pt[0],pt[1]]=True
     return path_in_img 
 
-def prune2(skel,outline,mask,poles,sensitivity=20,crop=0.1):
+def order_by_NN(points,source=None,destination=None,thresh=5):
+    ordered = []
+    if source is None:
+        source = points[0]
+    ordered.append(source)
+    pos = source
+
+    while points != []:
+        next_pos,r = find_NN(pos,points)
+        if r>thresh:
+            warnings.warn('Sorting terminated early when points exceeded allowable distance')
+            break
+        ind =np.where(np.array([np.all(p == next_pos) for p in points]))
+        points = list(np.delete(np.array(points),ind,axis=0))
+        ordered.append(next_pos)
+        pos = next_pos
+    if np.linalg.norm(ordered[-1]-destination)>2 and not destination is None:
+        warnings.warn('path did not reach destination')
+    return ordered
+
+def find_NN(point,posl):
+    NN = posl[0]
+    rmax = np.linalg.norm(posl[0]-point)
+    for pos in posl:
+        r = np.linalg.norm(pos-point)
+        if r<rmax:
+            NN = pos
+            rmax = r
+    return NN,rmax
+
+def prune2(skel,outline,mask,poles,sensitivity=5,crop=0.1,k_thresh=0.2):
+    '''Creates a centerline of the cell from the skeleton, removing branches and extending the centerline to the poles
+    skel = topological skeleton of the cell (boolean array)
+    outline = outline of the cell (boolean array)
+    mask = mask of the cell (booelan array)
+    poles = two poles of the cell. Ordered as [desired start pole of the centerline, desired end pole of the centerline]
+    sensitivity = distance to a pole (in pixels) which a branch of the skeleton must be to be considered to "reach" that pole. Default is 5 pixels
+    crop = proportion of the centerline to crop at a false pole (an end of a branch which intersects the outline not at a pole). Default is 0.1
+    k_thresh = curvature (radius of curvature^{-1}) threshold for the final spline. above this the centerline will be cropped for a second time to ensure
+    the ends of the centerline don't have abnormally high curvature. Default = 0.2 (corresponding to a radius of curvature of 5 pixels)
+    '''
     def crop_centerline(centerline_path):
-        '''Crops a proportion of the points (determined by the crop parameter) from the ends of a centerline with a false pole'''
+        '''Helper function. Crops a proportion of the points (determined by the crop parameter) from the ends of a centerline with a false pole
+        Paramters:
+        --------
+        centerline_path = list of points (numpy arrays) on a line in order of the arclength parametrization, initiated at the start node
+        '''
         crop_length=round(len(centerline_path)*crop)
         image = pts_to_img(centerline_path,skel)
         if true_starts == []:
             if axis:
-                start_centerline = image[:,0:N//2]
-                start_outline = outline[:,0:N//2]
+                start_centerline = image[:,0:n//2]
+                start_outline = outline[:,0:n//2]
             else:
-                start_centerline=image[0:M//2,:]
-                start_outline=outline[0:M//2,:]
+                start_centerline=image[0:m//2,:]
+                start_outline=outline[0:m//2,:]
             if intersection(start_centerline,start_outline):
+                #print('Starts',crop_length)
                 centerline_path= centerline_path[crop_length:]
 
         if true_ends == []:
             if axis:
-                end_centerline = image[:,N//2:N]
-                end_outline = outline[:,N//2:N]
+                end_centerline = image[:,n//2:n]
+                end_outline = outline[:,n//2:n]
             else:
-                end_centerline = image[M//2:M,:]
-                end_outline = outline[M//2:M,:]
+                end_centerline = image[m//2:m,:]
+                end_outline = outline[m//2:m,:]
             if intersection(end_centerline,end_outline): 
+                #print('Ends',crop_length)
                 centerline_path = centerline_path[:len(centerline_path)-crop_length]
         return centerline_path
     def find_splines(points):
+        '''
+        Helper function. Return spline of a centerline based on a set of ordered points.
+        Parameters
+        --------
+        points = list of points (numpy arrays) on a line in order of the arclength parametrization, initiated at the start node
+        '''
         s = np.linspace(0,1,1000)
         # remove repeated points
         diff = np.diff(points,axis=0)==0
@@ -911,6 +965,36 @@ def prune2(skel,outline,mask,poles,sensitivity=20,crop=0.1):
         tck,U=splprep(np.transpose(points))
         s = np.linspace(0,1,1000)
         [ys,xs]= splev(s,tck)
+        #calculate the curvature of the spline
+        v = np.transpose(splev(s,tck,der=1))
+        a = np.transpose(splev(s,tck,der=2))
+        k=abs(np.cross(v,a)/np.array([np.linalg.norm(V)**3 for V in v]))
+        # check if the curvature exceeds a threshold
+        if np.any(k>k_thresh):
+            warnings.warn('curvature threshold exceeded. additional pruning executed in response')
+            crop_length=round(len(points)*crop)
+            if true_starts == []:
+                points= points[crop_length:]
+            if true_ends == []:
+                points = points[:len(points)-crop_length]
+            #create a new spline
+            if true_starts ==[]:
+                points = [np.array([start_pole[1],start_pole[0]])] + points
+            if true_ends ==[]:
+                points = points + [np.array([end_pole[1],end_pole[0]])]
+            #remove repeated points
+            diff = np.diff(points,axis=0)==0
+            repeated = np.where(np.array([pt[0] and pt[1] for pt in diff]))
+            points = list(np.delete(points,repeated,axis=0))
+            #create a new spline
+            tck,U=splprep(np.transpose(points))
+            s = np.linspace(0,1,1000)
+            [ys,xs]= splev(s,tck)
+            v = np.transpose(splev(s,tck,der=1))
+            a = np.transpose(splev(s,tck,der=2))
+            k=abs(np.cross(v,a)/np.array([np.linalg.norm(V)**3 for V in v]))
+            if np.any(k>k_thresh):
+                warnings.warn('Curvature exceeds threshold')
         return [xs,ys],s
     def in_mask (path,mask):
         '''
@@ -973,22 +1057,21 @@ def prune2(skel,outline,mask,poles,sensitivity=20,crop=0.1):
             paths.append(path)
     if len(paths) == 1:
         path = paths[0]
-        edges = [(path[i],path[i+1]) for i in range(len(path)-1)] #edges of the graph corresponding to the centerline
         #initializing centerline
         centerline_path = []
         #calling points from the graph
+        edges = [(path[i],path[i+1]) for i in range (0,len(path)-1)]
         for (b,e) in edges:
             edge = graph[b][e]['pts']
             centerline_path = centerline_path + list(edge)
+        centerline_path=order_by_NN(centerline_path,nodes[path[0]]['o'],nodes[path[-1]]['o'],max(m,n)/2)
         if len(centerline_path)==0:
             raise ValueError('Skeleton has been erased')
-        centerline_path=reorder_opt(np.array(centerline_path))
         if np.linalg.norm(np.array([centerline_path[0][1],centerline_path[0][0]])-end_pole) < np.linalg.norm(np.array([centerline_path[0][1],centerline_path[0][0]])-start_pole):
             centerline_path.reverse()
-        centerline_path = crop_centerline(list(centerline_path))
+        centerline_path = crop_centerline(centerline_path)
         if len(centerline_path)<=5:
             raise ValueError('Skeleton has been erased')
-        centerline_path = reorder_opt(np.array(centerline_path))
         [xs,ys],u = find_splines(centerline_path)
         path = np.round(np.transpose(np.array([ys,xs]))).astype(np.uint32)
         path = in_mask(path,mask)
@@ -997,10 +1080,10 @@ def prune2(skel,outline,mask,poles,sensitivity=20,crop=0.1):
         return pruned_skel, length, [xs,ys],np.linspace(0,1,100)
     #convert paths (lists of nodes) to centerlines (lists of points)
     for path in paths:
-        edges = [(path[i],path[i+1]) for i in range(len(path)-1)] #edges of the graph corresponding to the centerline
         #initializing centerline
         centerline_path = []
         #calling points from the graph
+        edges = [(path[i],path[i+1]) for i in range (0,len(path)-1)]
         for (b,e) in edges:
             edge = graph[b][e]['pts']
             centerline_path = centerline_path + list(edge)
@@ -1008,10 +1091,10 @@ def prune2(skel,outline,mask,poles,sensitivity=20,crop=0.1):
         if len(centerline_path)==0:
             raise ValueError('Skeleton has been erased')
         #crop the centerline, if it has a false pole
-        centerline_path=reorder_opt(np.array(centerline_path))
+        centerline_path=order_by_NN(centerline_path,nodes[path[0]]['o'],nodes[path[-1]]['o'],max(m,n)/2)
         if np.linalg.norm(np.array([centerline_path[0][1],centerline_path[0][0]])-end_pole) < np.linalg.norm(np.array([centerline_path[0][1],centerline_path[0][0]])-start_pole):
             centerline_path.reverse()
-        centerline_path = crop_centerline(list(centerline_path))
+        centerline_path = crop_centerline(centerline_path)
         #find the length of each centerline
         length = len(centerline_path)
         # add to the list of centerlines and lengths
@@ -1061,8 +1144,11 @@ def explore_poles(outline,axis=True):
     '''
     #find points. Want to start on the axis we wish to find them on
     outline_pts = bool_sort(outline,axis)
-    outline_pts = reorder_opt(outline_pts,NN=2)
+    outline_pts = order_by_NN(outline_pts,outline_pts[0],outline_pts[0])
     outline_pts = outline_pts + [outline_pts[0]]
+    diff = np.diff(outline_pts,axis=0)==0
+    repeated = np.where(np.array([pt[0] and pt[1] for pt in diff]))
+    outline_pts = list(np.delete(outline_pts,repeated,axis=0))
     tck,U=splprep(np.transpose(outline_pts),per=1)
     [y,x] = splev(U,tck)
     r,centroid = radii(x,y)

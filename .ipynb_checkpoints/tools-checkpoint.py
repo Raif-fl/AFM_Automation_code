@@ -354,7 +354,10 @@ def extract_ind_cells(IDs_list, outl_list, height_img_list):
         for idx, cell in zip(ID_set, outl):
             # extract the mask from the
             mask = np.zeros(h_img.shape, dtype=np.uint8)
-            channel_count = h_img.shape[2]  # i.e. 3 or 4 depending on your image
+            if len(h_img.shape)>2:
+                channel_count = h_img.shape[2]  # i.e. 3 or 4 depending on your image
+            else:
+                channel_count = 1
             ignore_mask_color = (255,)*channel_count
             cv2.fillPoly(mask, [cell], ignore_mask_color)
             
@@ -452,8 +455,12 @@ def apply_radfil(image_list, mask_list, skel_list, conv = 1.001):
         ridge_set = []
         for image, mask, skel in zip(image_set, mask_set, skel_set):
             # Load the image, mask, and skeleton
-            fil_image = image[:,:,0]
-            fil_mask = mask[:,:,0]>0
+            if len(image.shape)>2:
+                fil_image = image[:,:,0]
+                fil_mask = mask[:,:,0]>0
+            else:
+                fil_image = image
+                fil_mask = mask>0
             fil_skeleton = skel>0
             
             # It is required that the skeleton be slightly truncated to avoid errors.
@@ -737,7 +744,10 @@ def padskel(mask):
     -------
     skel = a skeleton (boolean array)
     '''
-    mask = cv2.copyMakeBorder(mask,20,20,20,20,cv2.BORDER_CONSTANT,None,value=0)[:,:,0]>0 #add a border to the skel
+    if len(mask.shape)>2:
+        mask = cv2.copyMakeBorder(mask,20,20,20,20,cv2.BORDER_CONSTANT,None,value=0)[:,:,0]>0 #add a border to the skel
+    else:
+        mask = cv2.copyMakeBorder(mask,20,20,20,20,cv2.BORDER_CONSTANT,None,value=0)>0 #add a border to the skel
     skel = skeletonize(mask)
     skel = skel[20:np.shape(skel)[0]-20,20:np.shape(skel)[1]-20]
     return skel
